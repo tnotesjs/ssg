@@ -294,6 +294,9 @@ export async function buildSite(
     build: {
       outDir: config.outDir,
       emptyOutDir: true,
+      // dist/assets/ belongs to kb content (copied verbatim); bundle chunks
+      // live under _chunks/ to avoid collisions.
+      assetsDir: "_chunks",
       // Large optional renderers and uncommon Shiki grammars are emitted as
       // lazy chunks. Keep warnings focused on the eagerly loaded application.
       chunkSizeWarningLimit: 800,
