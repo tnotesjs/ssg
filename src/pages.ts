@@ -1,42 +1,121 @@
+/**
+ * src/pages.ts
+ *
+ * kb-driven page discovery: notes/*.md become routes, TOC.md becomes the
+ * sidebar, drafts are skipped, and the home page is the configured (or first)
+ * TOC note.
+ */
+
 import fs from "node:fs";
 import path from "node:path";
-import { glob } from "tinyglobby";
+import { scanKnowledgeBase } from "@tnotesjs/kb";
 
-import type { ResolvedSsgConfig } from "./types";
+import type { KbSnapshot, TocNode } from "@tnotesjs/kb";
+import type { ResolvedSsgConfig, SidebarItem } from "./types";
 
 export interface SourcePage {
   file: string;
   route: string;
   source: string;
+  /** Note title from the file name — wins over frontmatter/H1. */
+  titleHint: string;
+  /** Note index ("0001") for notes; empty for synthesized pages. */
+  noteIndex: string;
 }
 
-function toRoute(relativePath: string) {
-  const clean = relativePath.replaceAll("\\", "/").replace(/\.md$/i, "");
-  if (clean.toLowerCase() === "index") return "/";
-  return `/${clean}`;
+export interface CollectedSite {
+  pages: SourcePage[];
+  sidebar: SidebarItem[];
+  snapshot: KbSnapshot;
 }
 
-export async function collectPages(config: ResolvedSsgConfig) {
-  const ignore = [
-    "**/node_modules/**",
-    "**/.git/**",
-    "**/.tnotes/**",
-    "**/.vitepress/**",
-    ...config.ignore,
-  ];
-  const files = await glob("**/*.md", {
-    cwd: config.srcDir,
-    absolute: true,
-    ignore,
-  });
-  return files.sort().map((file): SourcePage => ({
-    file,
-    route: toRoute(path.relative(config.srcDir, file)),
-    source: fs.readFileSync(file, "utf8"),
-  }));
+export function noteRoute(fileName: string): string {
+  return `/notes/${fileName.replace(/\.md$/i, "")}`;
 }
 
 export function routeToOutput(route: string) {
   if (route === "/") return "index.html";
   return `${route.slice(1)}.html`;
+}
+
+function toSidebarItems(
+  nodes: TocNode[],
+  noteByIndex: ReadonlyMap<string, { title: string; fileName: string; draft: boolean }>,
+): SidebarItem[] {
+  const items: SidebarItem[] = [];
+  for (const node of nodes) {
+    if (node.kind === "group") {
+      items.push({
+        text: node.title,
+        collapsed: true,
+        items: toSidebarItems(node.children, noteByIndex),
+      });
+      continue;
+    }
+    const note = noteByIndex.get(node.index);
+    if (!note || note.draft) continue; // drafts are not built
+    items.push({
+      text: `${node.done ? "✅" : "⏰"} ${node.index}. ${note.title}`,
+      link: noteRoute(note.fileName),
+      items: toSidebarItems(node.children, noteByIndex),
+    });
+  }
+  return items;
+}
+
+/** First note in TOC order (used as the default home page). */
+function firstTocNoteIndex(nodes: TocNode[]): string | undefined {
+  for (const node of nodes) {
+    if (node.kind === "note") return node.index;
+    const nested = firstTocNoteIndex(node.children);
+    if (nested) return nested;
+  }
+  return undefined;
+}
+
+export async function collectSite(
+  config: ResolvedSsgConfig,
+): Promise<CollectedSite> {
+  const snapshot = await scanKnowledgeBase(config.root);
+  const noteByIndex = new Map(
+    snapshot.notes.map((note) => [
+      note.index,
+      { title: note.title, fileName: note.fileName, draft: note.frontmatter.draft === true },
+    ]),
+  );
+
+  const pages: SourcePage[] = [];
+  for (const note of snapshot.notes) {
+    if (note.frontmatter.draft === true) continue;
+    pages.push({
+      file: path.join(config.root, note.relPath),
+      route: noteRoute(note.fileName),
+      source: fs.readFileSync(path.join(config.root, note.relPath), "utf8"),
+      titleHint: note.title,
+      noteIndex: note.index,
+    });
+  }
+
+  // Home page: configured note, else the first TOC note, else a placeholder.
+  const homeIndex =
+    (config.home && noteByIndex.has(config.home) ? config.home : undefined) ??
+    firstTocNoteIndex(snapshot.toc);
+  const homePage = pages.find((page) => page.noteIndex === homeIndex);
+  if (homePage) {
+    pages.unshift({ ...homePage, route: "/" });
+  } else {
+    pages.unshift({
+      file: path.join(config.cacheDir, "index.md"),
+      route: "/",
+      source: `# ${config.title}\n`,
+      titleHint: config.title,
+      noteIndex: "",
+    });
+  }
+
+  return {
+    pages,
+    sidebar: toSidebarItems(snapshot.toc, noteByIndex),
+    snapshot,
+  };
 }

@@ -15,7 +15,7 @@ import {
 import { resolveConfig } from "./config";
 import { normalizeSearchTerm, tokenizeSearch } from "./client/search";
 import { createMarkdownCompiler, type CompiledMarkdown } from "./markdown";
-import { collectPages, routeToOutput } from "./pages";
+import { collectSite, routeToOutput, type SourcePage } from "./pages";
 import { tnotesPlugin } from "./vitePlugin";
 
 import type { PageData, ResolvedSsgConfig } from "./types";
@@ -119,15 +119,17 @@ function resolveInternalRoute(raw: string, currentRoute: string) {
 
 function validateDeadLinks(
   config: ResolvedSsgConfig,
-  pages: Array<{ route: string; file: string }>,
+  pages: SourcePage[],
   compiled: Map<string, CompiledMarkdown>,
 ) {
   if (config.ignoreDeadLinks === true) return;
   const routes = new Set(pages.map((page) => page.route));
-  const ignores = config.ignoreDeadLinks || [];
+  const ignores = Array.isArray(config.ignoreDeadLinks)
+    ? config.ignoreDeadLinks
+    : [];
   const errors: string[] = [];
   for (const page of pages) {
-    for (const link of compiled.get(page.file)?.links ?? []) {
+    for (const link of compiled.get(`${page.file}:${page.route}`)?.links ?? []) {
       const localFile = decodeURIComponent(link.split(/[?#]/)[0]);
       if (
         !localFile.startsWith("/") &&
@@ -137,14 +139,7 @@ function validateDeadLinks(
       }
       const route = resolveInternalRoute(link, page.route);
       if (!route || routes.has(route)) continue;
-      if (
-        Array.isArray(ignores) &&
-        ignores.some((ignore) =>
-          typeof ignore === "string" ? ignore === link : ignore.test(link),
-        )
-      ) {
-        continue;
-      }
+      if (ignores.some((ignore) => ignore === link)) continue;
       errors.push(`${path.relative(config.root, page.file)} -> ${link}`);
     }
   }
@@ -156,31 +151,34 @@ function validateDeadLinks(
 }
 
 async function prepareBuild(config: ResolvedSsgConfig) {
-  const pages = await collectPages(config);
-  if (!pages.length)
-    throw new Error(`No Markdown pages found in ${config.srcDir}`);
+  const { pages, sidebar, snapshot } = await collectSite(config);
+  for (const diagnostic of snapshot.diagnostics) {
+    if (diagnostic.severity === "error") {
+      console.warn(`[kb] ${diagnostic.message}`);
+    }
+  }
   if (!pages.some((page) => page.route === "/404")) {
     const file = path.join(config.cacheDir, "404.md");
     const source = "# 页面未找到\n\n[返回首页](/)\n";
     await fs.writeFile(file, source);
-    pages.push({ file, route: "/404", source });
+    pages.push({ file, route: "/404", source, titleHint: "404", noteIndex: "" });
   }
   const compiler = await createMarkdownCompiler(config);
   await compiler.prepare(pages.map((page) => page.source));
   const compiled = new Map<string, CompiledMarkdown>();
   for (const page of pages) {
     compiled.set(
-      page.file,
-      compiler.compile(page.source, page.file, page.route),
+      `${page.file}:${page.route}`,
+      compiler.compile(page.source, page.file, page.route, page.titleHint),
     );
   }
   validateDeadLinks(config, pages, compiled);
-  return { pages, compiled };
+  return { pages, sidebar, compiled };
 }
 
 async function writeSearchIndex(
   config: ResolvedSsgConfig,
-  pages: Array<{ route: string; file: string }>,
+  pages: SourcePage[],
   compiled: Map<string, CompiledMarkdown>,
 ) {
   const search = new MiniSearch<PageData>({
@@ -190,26 +188,42 @@ async function writeSearchIndex(
     tokenize: tokenizeSearch,
     processTerm: normalizeSearchTerm,
   });
-  search.addAll(
-    pages
-      .filter((page) => page.route !== "/404")
-      .map((page) => compiled.get(page.file)!.data),
-  );
+  // The home note is emitted at both "/" and its /notes/... route — index the
+  // first occurrence ("/") only.
+  const seenFiles = new Set<string>();
+  const documents = pages
+    .filter((page) => page.route !== "/404")
+    .filter((page) => {
+      if (seenFiles.has(page.file)) return false;
+      seenFiles.add(page.file);
+      return true;
+    })
+    .map((page) => compiled.get(`${page.file}:${page.route}`)!.data);
+  search.addAll(documents);
   await fs.writeFile(
     path.join(config.outDir, "search-index.json"),
     JSON.stringify(search),
   );
 }
 
+/** Library-level assets/ are referenced as ../assets/... — copy verbatim. */
+async function copyAssets(config: ResolvedSsgConfig) {
+  const source = path.join(config.root, "assets");
+  if (!existsSync(source)) return;
+  await fs.cp(source, path.join(config.outDir, "assets"), {
+    recursive: true,
+  });
+}
+
 export async function buildSite(
   root = process.cwd(),
   options: { dev?: boolean } = {},
 ) {
-  const config = await resolveConfig(root, "build");
+  const config = await resolveConfig(root);
   await fs.rm(config.cacheDir, { recursive: true, force: true });
   await fs.mkdir(config.cacheDir, { recursive: true });
   await linkRuntimeDependencies(config.cacheDir);
-  const { pages, compiled } = await prepareBuild(config);
+  const { pages, sidebar, compiled } = await prepareBuild(config);
   await fs.writeFile(
     path.join(config.cacheDir, "entry.ts"),
     `import ${JSON.stringify(path.join(clientRoot, "entry.ts"))}`,
@@ -220,10 +234,13 @@ export async function buildSite(
   );
 
   const plugins = () => [
-    tnotesPlugin(config, pages, compiled),
+    tnotesPlugin(config, sidebar, pages, compiled),
     vue({
       include: [/\.vue$/, /\.md$/],
       template: {
+        // Markdown-generated HTML references assets relatively (../assets/…);
+        // the files are copied verbatim, so asset-URL imports must stay off.
+        transformAssetUrls: false,
         compilerOptions: {
           isCustomElement: (tag) => tag.startsWith("mjx-"),
         },
@@ -285,6 +302,7 @@ export async function buildSite(
     resolve: { dedupe: ["vue"] },
     logLevel: "warn",
   });
+  await copyAssets(config);
   await writeSearchIndex(config, pages, compiled);
   return { config, pageCount: pages.length };
 }
@@ -294,7 +312,7 @@ export async function previewSite(
   options: { port?: number; host?: string | boolean } = {},
   configurePreviewServer?: PreviewServerHook,
 ): Promise<PreviewServer> {
-  const config = await resolveConfig(root, "serve");
+  const config = await resolveConfig(root);
   return vitePreview({
     root: config.root,
     base: config.base,

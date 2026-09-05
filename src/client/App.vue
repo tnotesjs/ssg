@@ -2,11 +2,6 @@
   <div class="tn-site">
     <header class="tn-site-header">
       <a class="tn-site-brand" :href="site.base">{{ site.title }}</a>
-      <nav>
-        <a v-for="item in site.nav" :key="item.link" :href="navHref(item.link)">
-          {{ item.text }}
-        </a>
-      </nav>
       <div class="tn-site-actions">
         <button type="button" aria-label="搜索" @click="searchOpen = true">
           ⌕
@@ -22,17 +17,6 @@
         <SidebarTree :items="site.sidebar" :route="route" :base="site.base" />
       </aside>
       <main class="tn-site-main">
-        <section v-if="hero" class="tn-site-hero">
-          <img
-            v-if="hero.image?.src"
-            :src="navHref(hero.image.src)"
-            :alt="hero.image.alt || ''"
-          />
-          <div>
-            <h1>{{ hero.name || data.title }}</h1>
-            <p>{{ hero.tagline }}</p>
-          </div>
-        </section>
         <component :is="page" />
       </main>
       <aside v-if="data.headings.length" class="tn-site-outline">
@@ -86,11 +70,6 @@ const props = defineProps<{
 }>();
 
 type SearchResult = Pick<PageData, "route" | "title" | "text">;
-type Hero = {
-  name?: string;
-  tagline?: string;
-  image?: { src?: string; alt?: string };
-};
 
 const searchOpen = ref(false);
 const searching = ref(false);
@@ -104,7 +83,6 @@ const results = computed<SearchResult[]>(() => {
     .slice(0, 20)
     .map((result) => result as unknown as SearchResult);
 });
-const hero = computed(() => props.data.frontmatter.hero as Hero | undefined);
 
 const navHref = (link: string) => {
   if (/^(https?:)?\/\//.test(link)) return link;

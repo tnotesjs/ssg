@@ -3,7 +3,7 @@ import path from "node:path";
 
 import type { Plugin } from "vite";
 import type { CompiledMarkdown } from "./markdown";
-import type { ResolvedSsgConfig } from "./types";
+import type { ResolvedSsgConfig, SidebarItem } from "./types";
 import type { SourcePage } from "./pages";
 
 const PAGES_ID = "\0virtual:tnotes-pages";
@@ -13,23 +13,31 @@ const THEME_ID = "\0virtual:tnotes-theme";
 const canonicalFile = (file: string) =>
   fs.existsSync(file) ? fs.realpathSync.native(file) : path.resolve(file);
 
-const serializeSite = (site: ResolvedSsgConfig) => ({
-  ...site,
+const serializeSite = (
+  site: ResolvedSsgConfig,
+  sidebar: SidebarItem[],
+) => ({
+  base: site.base,
+  title: site.title,
+  description: site.description,
+  lang: site.lang,
+  discussions: site.discussions,
+  sidebar,
   markdown: {
     lineNumbers: site.markdown.lineNumbers,
     math: site.markdown.math,
     imageLazyLoading: site.markdown.imageLazyLoading,
   },
-  ignoreDeadLinks: Boolean(site.ignoreDeadLinks),
 });
 
 export function tnotesPlugin(
   config: ResolvedSsgConfig,
+  sidebar: SidebarItem[],
   sources: SourcePage[],
   compiled: Map<string, CompiledMarkdown>,
 ): Plugin {
   const byFile = new Map(
-    sources.map((page) => [canonicalFile(page.file), page]),
+    sources.map((page) => [`${canonicalFile(page.file)}:${page.route}`, page]),
   );
 
   return {
@@ -42,7 +50,7 @@ export function tnotesPlugin(
     },
     load(id) {
       if (id === SITE_ID) {
-        return `export default ${JSON.stringify(serializeSite(config))}`;
+        return `export default ${JSON.stringify(serializeSite(config, sidebar))}`;
       }
       if (id === THEME_ID) {
         return config.theme
@@ -51,28 +59,28 @@ export function tnotesPlugin(
       }
       if (id === PAGES_ID) {
         const imports = sources
-          .map(
-            (page) =>
-              `${JSON.stringify(page.route)}: () => import(${JSON.stringify(page.file)})`,
-          )
+          .map((page) => {
+            const specifier = `${page.file}?route=${encodeURIComponent(page.route)}`;
+            return `${JSON.stringify(page.route)}: () => import(${JSON.stringify(specifier)})`;
+          })
           .join(",\n");
         const data = Object.fromEntries(
-          sources.map((page) => [page.route, compiled.get(page.file)!.data]),
+          sources.map((page) => [
+            page.route,
+            compiled.get(`${page.file}:${page.route}`)!.data,
+          ]),
         );
         return `export const pages = {${imports}}; export const pageData = ${JSON.stringify(data)};`;
       }
     },
     transform(_code, id) {
-      if (!id.endsWith(".md")) return;
-      const filename = canonicalFile(id.split("?")[0]);
-      const page = byFile.get(filename);
+      const [file, query] = id.split("?");
+      if (!file.endsWith(".md")) return;
+      const route = new URLSearchParams(query ?? "").get("route");
+      if (!route) return;
+      const page = byFile.get(`${canonicalFile(file)}:${route}`);
       if (!page) return;
-      return compiled.get(page.file)?.vueSource;
-    },
-    configureServer(server) {
-      for (const result of compiled.values()) {
-        for (const include of result.includes) server.watcher.add(include);
-      }
+      return compiled.get(`${page.file}:${page.route}`)?.vueSource;
     },
   };
 }

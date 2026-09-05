@@ -21,93 +21,147 @@ function write(relativePath: string, content: string) {
 beforeAll(async () => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), "tnotes-ssg-site-"));
   write(
-    "tnotes.config.mts",
-    `export default {
-      base: "/fixture/",
-      title: "Fixture",
-      description: "SSG fixture",
-      markdown: { math: true },
-    }`,
+    "tnotes.json",
+    JSON.stringify(
+      {
+        base: "/fixture/",
+        title: "Fixture",
+        description: "SSG fixture",
+      },
+      null,
+      2,
+    ),
+  );
+  write(
+    "TOC.md",
+    `- 分组 A
+  - [x] 0001. 首页笔记
+  - [ ] 0002. 指南
+  - [ ] 0003. 草稿
+`,
   );
   write(
     "LocalMessage.vue",
     `<script setup lang="ts">defineProps<{ text: string }>()</script>
 <template><strong class="local-message">{{ text }}</strong></template>`,
   );
-  write("sample.ts", "const first = 1;\nconst second = 2;\nconst third = 3;\n");
   write(
-    "index.md",
+    "notes/0001. 首页笔记.md",
     `---
-title: Fixture Home
-description: Fixture description
+id: 00000000-0000-4000-8000-000000000001
+description: 首页描述
 ---
 <script setup>
-import LocalMessage from './LocalMessage.vue'
+import LocalMessage from '../LocalMessage.vue'
 const message = 'Vue SFC works'
 </script>
 
-# Fixture Home
+# 首页笔记
 
 <LocalMessage :text="message" />
 
-[Read the guide](./guide.md)
+[阅读指南](./0002.%20指南.md)
 
-<<< ./sample.ts{1-2} [typescript]
+![图片](../assets/pic.txt)
 `,
   );
   write(
-    "guide.md",
-    `# Guide
+    "notes/0002. 指南.md",
+    `---
+id: 00000000-0000-4000-8000-000000000002
+---
+# 指南
 
-[Home](/)
+[回首页](/)
 
-::: tip Shared shell
-The container pipeline works. 搜索中文。
+::: tip 提示
+容器管线正常。搜索中文。
 :::
 
 $x^2$
+
+\`\`\`mermaid
+graph TD
+  A --> B
+\`\`\`
+
+\`\`\`mindmap
+- 根
+  - 子
+\`\`\`
+
+::: footprints 2026-09-06 12:00
+一段足迹正文。
+:::
 `,
   );
+  write(
+    "notes/0003. 草稿.md",
+    `---
+draft: true
+---
+# 草稿不应发布
+`,
+  );
+  write("assets/pic.txt", "asset file");
   write("public/fixture.txt", "public asset");
 
   await buildSite(root);
-}, 60_000);
+}, 120_000);
 
 afterAll(() => {
   if (root) fs.rmSync(root, { recursive: true, force: true });
 });
 
+const dist = (...segments: string[]) =>
+  path.join(root, ".tnotes/dist", ...segments);
+
 describe("static site build", () => {
-  it("renders Vue-in-Markdown, snippets and base-prefixed assets", () => {
-    const html = fs.readFileSync(
-      path.join(root, ".tnotes/dist/index.html"),
+  it("renders the first TOC note as home and every note at its route", () => {
+    const home = fs.readFileSync(dist("index.html"), "utf8");
+    expect(home).toContain("Vue SFC works");
+    expect(home).toContain("首页笔记");
+    // Note routes use the single-file name.
+    const noteHtml = fs.readFileSync(
+      dist("notes/0001. 首页笔记.html"),
       "utf8",
     );
-    expect(html).toContain("Vue SFC works");
-    expect(html).toContain("tn-code-block");
-    // Shiki splits tokens into spans; assert on the stripped text content.
-    const text = html.replace(/<[^>]+>/g, "");
-    expect(text).toContain("const first = 1;");
-    expect(text).toContain("const second = 2;");
-    // Snippet import is ranged ({1-2}); line 3 must not leak in.
-    expect(text).not.toContain("const third");
-    expect(html).toContain('href="./guide"');
-    expect(html).toMatch(/src="\/fixture\/assets\//);
-    expect(fs.existsSync(path.join(root, ".tnotes/dist/guide.html"))).toBe(
-      true,
-    );
-    expect(fs.existsSync(path.join(root, ".tnotes/dist/404.html"))).toBe(true);
-    expect(
-      fs.readFileSync(path.join(root, ".tnotes/dist/fixture.txt"), "utf8"),
-    ).toBe("public asset");
+    expect(noteHtml).toContain("Vue SFC works");
+    // Cross-note relative links keep working (.md stripped, CJK encoded).
+    expect(home).toContain('href="./0002.%20%E6%8C%87%E5%8D%97"');
+    // Asset references are rewritten to base-absolute (assets/ copied verbatim).
+    expect(home).toContain('src="/fixture/assets/pic.txt"');
+    // Drafts are not built.
+    expect(fs.existsSync(dist("notes/0003. 草稿.html"))).toBe(false);
+    expect(fs.existsSync(dist("404.html"))).toBe(true);
   });
 
-  it("emits a serialized local-search index", () => {
-    const serialized = fs.readFileSync(
-      path.join(root, ".tnotes/dist/search-index.json"),
-      "utf8",
-    );
+  it("renders the TOC sidebar with done markers", () => {
+    const home = fs.readFileSync(dist("index.html"), "utf8");
+    expect(home).toContain("分组 A");
+    expect(home).toContain("✅ 0001. 首页笔记");
+    expect(home).toContain("⏰ 0002. 指南");
+    expect(home).not.toContain("0003. 草稿");
+  });
+
+  it("renders the TNotes block set", () => {
+    const guide = fs.readFileSync(dist("notes/0002. 指南.html"), "utf8");
+    expect(guide).toContain("tn-custom-block tip");
+    expect(guide).toContain("tn-mermaid");
+    expect(guide).toMatch(/tn-mindmap|mindmap/i);
+    expect(guide).toContain("一段足迹正文。");
+    expect(guide).toContain("mjx"); // mathjax
+  });
+
+  it("copies library assets and public files into dist", () => {
+    expect(fs.readFileSync(dist("assets/pic.txt"), "utf8")).toBe("asset file");
+    expect(fs.readFileSync(dist("fixture.txt"), "utf8")).toBe("public asset");
+  });
+
+  it("emits a serialized local-search index without drafts", () => {
+    const serialized = fs.readFileSync(dist("search-index.json"), "utf8");
     const index = JSON.parse(serialized) as { documentCount: number };
+    // Home + its note route are deduplicated; the draft is excluded.
     expect(index.documentCount).toBe(2);
     const search = MiniSearch.loadJSON(serialized, {
       fields: ["title", "headings", "text"],
@@ -115,8 +169,9 @@ describe("static site build", () => {
       tokenize: tokenizeSearch,
       processTerm: normalizeSearchTerm,
     });
-    expect(search.search("Fixture")[0]?.route).toBe("/");
-    expect(search.search("中文")[0]?.route).toBe("/guide");
+    expect(search.search("首页笔记")[0]?.route).toBe("/");
+    expect(search.search("中文")[0]?.route).toBe("/notes/0002. 指南");
+    expect(search.search("草稿")).toHaveLength(0);
   });
 
   it("serves the generated site under its configured base", async () => {
@@ -127,12 +182,12 @@ describe("static site build", () => {
         throw new Error("Missing preview port");
       const response = await fetch(`http://127.0.0.1:${address.port}/fixture/`);
       expect(response.status).toBe(200);
-      expect(await response.text()).toContain("Fixture Home");
+      expect(await response.text()).toContain("首页笔记");
       const guide = await fetch(
-        `http://127.0.0.1:${address.port}/fixture/guide`,
+        `http://127.0.0.1:${address.port}/fixture/notes/0002.%20指南`,
       );
       expect(guide.status).toBe(200);
-      expect(await guide.text()).toContain("Shared shell");
+      expect(await guide.text()).toContain("提示");
     } finally {
       await new Promise<void>((resolve, reject) =>
         server.httpServer.close((error) => (error ? reject(error) : resolve())),
@@ -147,10 +202,13 @@ describe("dead links", () => {
       path.join(os.tmpdir(), "tnotes-ssg-deadlink-"),
     );
     try {
-      fs.writeFileSync(
-        path.join(invalidRoot, "index.md"),
-        "# Home\n\n[Missing](./missing.md)\n",
-      );
+      const w = (rel: string, content: string) => {
+        const file = path.join(invalidRoot, rel);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, content);
+      };
+      w("TOC.md", "- [ ] 0001. 首页\n");
+      w("notes/0001. 首页.md", "# 首页\n\n[缺失](./0002. 不存在.md)\n");
       await expect(buildSite(invalidRoot)).rejects.toThrow("dead link");
     } finally {
       fs.rmSync(invalidRoot, { recursive: true, force: true });

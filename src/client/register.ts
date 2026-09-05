@@ -9,7 +9,7 @@ import NotesTableAdapter from "./components/NotesTableAdapter";
 import SidebarCard from "./components/SidebarCard.vue";
 
 import type { App, Component } from "vue";
-import type { PageData, ResolvedSsgConfig } from "../types";
+import type { PageData, SiteData } from "../types";
 import { NOTES_DATA_KEY, SITE_BASE_KEY } from "./components/NotesTableAdapter";
 
 const Discussions = defineComponent({
@@ -39,7 +39,7 @@ const WordList = lazyComponent(() => import("@tnotesjs/ui/word-list"));
 
 export function registerTNotesComponents(
   app: App,
-  site: ResolvedSsgConfig,
+  site: SiteData,
   pages: Record<string, PageData>,
 ) {
   app.provide(NOTES_DATA_KEY, pages);

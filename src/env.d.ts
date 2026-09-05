@@ -15,17 +15,17 @@ declare module "virtual:tnotes-pages" {
 }
 
 declare module "virtual:tnotes-site" {
-  const site: import("./types").ResolvedSsgConfig;
+  const site: import("./types").SiteData;
   export default site;
 }
 
 declare module "virtual:tnotes-theme" {
   import type { App } from "vue";
-  import type { PageData, ResolvedSsgConfig } from "./types";
+  import type { PageData, SiteData } from "./types";
   const theme: {
     enhanceApp?: (context: {
       app: App;
-      site: ResolvedSsgConfig;
+      site: SiteData;
       pages: Record<string, PageData>;
     }) => void;
   };
