@@ -2,8 +2,7 @@
  * src/pages.ts
  *
  * kb-driven page discovery: notes/*.md become routes, TOC.md becomes the
- * sidebar, drafts are skipped, and the home page is the configured (or first)
- * TOC note.
+ * sidebar, and the home page is the configured (or first) TOC note.
  */
 
 import fs from "node:fs";
@@ -11,6 +10,7 @@ import path from "node:path";
 import { scanKnowledgeBase } from "@tnotesjs/kb";
 
 import type { KbSnapshot, TocNode } from "@tnotesjs/kb";
+import { canonicalNoteRoute } from "./noteRoute";
 import type { ResolvedSsgConfig, SidebarItem } from "./types";
 
 export interface SourcePage {
@@ -29,8 +29,8 @@ export interface CollectedSite {
   snapshot: KbSnapshot;
 }
 
-export function noteRoute(fileName: string): string {
-  return `/notes/${fileName.replace(/\.md$/i, "")}`;
+export function noteRoute(index: string): string {
+  return canonicalNoteRoute(index);
 }
 
 export function routeToOutput(route: string) {
@@ -40,7 +40,7 @@ export function routeToOutput(route: string) {
 
 function toSidebarItems(
   nodes: TocNode[],
-  noteByIndex: ReadonlyMap<string, { title: string; fileName: string; draft: boolean }>,
+  noteByIndex: ReadonlyMap<string, { title: string; fileName: string }>,
 ): SidebarItem[] {
   const items: SidebarItem[] = [];
   for (const node of nodes) {
@@ -53,10 +53,10 @@ function toSidebarItems(
       continue;
     }
     const note = noteByIndex.get(node.index);
-    if (!note || note.draft) continue; // drafts are not built
+    if (!note) continue;
     items.push({
       text: `${node.done ? "✅" : "⏰"} ${node.index}. ${note.title}`,
-      link: noteRoute(note.fileName),
+      link: noteRoute(node.index),
       items: toSidebarItems(node.children, noteByIndex),
     });
   }
@@ -80,16 +80,15 @@ export async function collectSite(
   const noteByIndex = new Map(
     snapshot.notes.map((note) => [
       note.index,
-      { title: note.title, fileName: note.fileName, draft: note.frontmatter.draft === true },
+      { title: note.title, fileName: note.fileName },
     ]),
   );
 
   const pages: SourcePage[] = [];
   for (const note of snapshot.notes) {
-    if (note.frontmatter.draft === true) continue;
     pages.push({
       file: path.join(config.root, note.relPath),
-      route: noteRoute(note.fileName),
+      route: noteRoute(note.index),
       source: fs.readFileSync(path.join(config.root, note.relPath), "utf8"),
       titleHint: note.title,
       noteIndex: note.index,

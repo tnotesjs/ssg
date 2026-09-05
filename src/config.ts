@@ -39,7 +39,7 @@ export async function resolveConfig(
     title: user.title ?? path.basename(absoluteRoot),
     description: user.description ?? "",
     lang: user.lang ?? "zh-Hans",
-    port: user.port ?? 5173,
+    port: user.port ?? 4173,
     home: user.home,
     discussions: user.discussions === true,
     ignoreDeadLinks: user.ignoreDeadLinks ?? false,

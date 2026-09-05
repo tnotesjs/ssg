@@ -37,7 +37,6 @@ beforeAll(async () => {
     `- 分组 A
   - [x] 0001. 首页笔记
   - [ ] 0002. 指南
-  - [ ] 0003. 草稿
 `,
   );
   write(
@@ -95,14 +94,6 @@ graph TD
 :::
 `,
   );
-  write(
-    "notes/0003. 草稿.md",
-    `---
-draft: true
----
-# 草稿不应发布
-`,
-  );
   write("assets/pic.txt", "asset file");
   write("public/fixture.txt", "public asset");
 
@@ -121,18 +112,13 @@ describe("static site build", () => {
     const home = fs.readFileSync(dist("index.html"), "utf8");
     expect(home).toContain("Vue SFC works");
     expect(home).toContain("首页笔记");
-    // Note routes use the single-file name.
-    const noteHtml = fs.readFileSync(
-      dist("notes/0001. 首页笔记.html"),
-      "utf8",
-    );
+    // Canonical note route is /notes/{n}.
+    const noteHtml = fs.readFileSync(dist("notes/1.html"), "utf8");
     expect(noteHtml).toContain("Vue SFC works");
-    // Cross-note relative links keep working (.md stripped, CJK encoded).
-    expect(home).toContain('href="./0002.%20%E6%8C%87%E5%8D%97"');
+    // Cross-note links rewrite to the canonical /notes/{n} form.
+    expect(home).toContain('href="/fixture/notes/2"');
     // Asset references are rewritten to base-absolute (assets/ copied verbatim).
     expect(home).toContain('src="/fixture/assets/pic.txt"');
-    // Drafts are not built.
-    expect(fs.existsSync(dist("notes/0003. 草稿.html"))).toBe(false);
     expect(fs.existsSync(dist("404.html"))).toBe(true);
   });
 
@@ -141,11 +127,10 @@ describe("static site build", () => {
     expect(home).toContain("分组 A");
     expect(home).toContain("✅ 0001. 首页笔记");
     expect(home).toContain("⏰ 0002. 指南");
-    expect(home).not.toContain("0003. 草稿");
   });
 
   it("renders the TNotes block set", () => {
-    const guide = fs.readFileSync(dist("notes/0002. 指南.html"), "utf8");
+    const guide = fs.readFileSync(dist("notes/2.html"), "utf8");
     expect(guide).toContain("tn-custom-block tip");
     expect(guide).toContain("tn-mermaid");
     expect(guide).toMatch(/tn-mindmap|mindmap/i);
@@ -158,10 +143,10 @@ describe("static site build", () => {
     expect(fs.readFileSync(dist("fixture.txt"), "utf8")).toBe("public asset");
   });
 
-  it("emits a serialized local-search index without drafts", () => {
+  it("emits a serialized local-search index", () => {
     const serialized = fs.readFileSync(dist("search-index.json"), "utf8");
     const index = JSON.parse(serialized) as { documentCount: number };
-    // Home + its note route are deduplicated; the draft is excluded.
+    // Home + its note route are deduplicated.
     expect(index.documentCount).toBe(2);
     const search = MiniSearch.loadJSON(serialized, {
       fields: ["title", "headings", "text"],
@@ -170,7 +155,7 @@ describe("static site build", () => {
       processTerm: normalizeSearchTerm,
     });
     expect(search.search("首页笔记")[0]?.route).toBe("/");
-    expect(search.search("中文")[0]?.route).toBe("/notes/0002. 指南");
+    expect(search.search("中文")[0]?.route).toBe("/notes/2");
     expect(search.search("草稿")).toHaveLength(0);
   });
 
@@ -184,10 +169,22 @@ describe("static site build", () => {
       expect(response.status).toBe(200);
       expect(await response.text()).toContain("首页笔记");
       const guide = await fetch(
-        `http://127.0.0.1:${address.port}/fixture/notes/0002.%20指南`,
+        `http://127.0.0.1:${address.port}/fixture/notes/2`,
       );
       expect(guide.status).toBe(200);
       expect(await guide.text()).toContain("提示");
+      const alias = await fetch(
+        `http://127.0.0.1:${address.port}/fixture/notes/0001.%20首页笔记`,
+        { redirect: "manual" },
+      );
+      expect(alias.status).toBe(302);
+      expect(alias.headers.get("location")).toBe("/fixture/notes/1");
+      const byId = await fetch(
+        `http://127.0.0.1:${address.port}/fixture/notes/00000000-0000-4000-8000-000000000001`,
+        { redirect: "manual" },
+      );
+      expect(byId.status).toBe(302);
+      expect(byId.headers.get("location")).toBe("/fixture/notes/1");
     } finally {
       await new Promise<void>((resolve, reject) =>
         server.httpServer.close((error) => (error ? reject(error) : resolve())),

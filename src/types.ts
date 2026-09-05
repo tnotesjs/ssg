@@ -61,6 +61,11 @@ export interface ResolvedSsgConfig {
   markdown: MarkdownConfig;
 }
 
+export interface SiteNoteRef {
+  index: string;
+  id?: string;
+}
+
 /** The serialized `virtual:tnotes-site` payload available to the client. */
 export interface SiteData {
   base: string;
@@ -70,4 +75,5 @@ export interface SiteData {
   discussions: boolean;
   sidebar: SidebarItem[];
   markdown: MarkdownConfig;
+  notes: SiteNoteRef[];
 }

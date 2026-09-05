@@ -15,6 +15,12 @@ import {
 import { resolveConfig } from "./config";
 import { normalizeSearchTerm, tokenizeSearch } from "./client/search";
 import { createMarkdownCompiler, type CompiledMarkdown } from "./markdown";
+import {
+  resolveNotePath,
+  resolveNoteSlug,
+  stripBase,
+  type NoteRef,
+} from "./noteRoute";
 import { collectSite, routeToOutput, type SourcePage } from "./pages";
 import { tnotesPlugin } from "./vitePlugin";
 
@@ -121,6 +127,7 @@ function validateDeadLinks(
   config: ResolvedSsgConfig,
   pages: SourcePage[],
   compiled: Map<string, CompiledMarkdown>,
+  notes: NoteRef[],
 ) {
   if (config.ignoreDeadLinks === true) return;
   const routes = new Set(pages.map((page) => page.route));
@@ -138,7 +145,11 @@ function validateDeadLinks(
         continue;
       }
       const route = resolveInternalRoute(link, page.route);
-      if (!route || routes.has(route)) continue;
+      if (!route) continue;
+      if (routes.has(route)) continue;
+      const slug = route.split("/").filter(Boolean).pop();
+      const canonical = slug ? resolveNoteSlug(slug, notes) : null;
+      if (canonical && routes.has(canonical)) continue;
       if (ignores.some((ignore) => ignore === link)) continue;
       errors.push(`${path.relative(config.root, page.file)} -> ${link}`);
     }
@@ -152,6 +163,10 @@ function validateDeadLinks(
 
 async function prepareBuild(config: ResolvedSsgConfig) {
   const { pages, sidebar, snapshot } = await collectSite(config);
+  const notes: NoteRef[] = snapshot.notes.map((note) => ({
+    index: note.index,
+    id: note.frontmatter.id,
+  }));
   for (const diagnostic of snapshot.diagnostics) {
     if (diagnostic.severity === "error") {
       console.warn(`[kb] ${diagnostic.message}`);
@@ -163,7 +178,7 @@ async function prepareBuild(config: ResolvedSsgConfig) {
     await fs.writeFile(file, source);
     pages.push({ file, route: "/404", source, titleHint: "404", noteIndex: "" });
   }
-  const compiler = await createMarkdownCompiler(config);
+  const compiler = await createMarkdownCompiler(config, notes);
   await compiler.prepare(pages.map((page) => page.source));
   const compiled = new Map<string, CompiledMarkdown>();
   for (const page of pages) {
@@ -172,8 +187,8 @@ async function prepareBuild(config: ResolvedSsgConfig) {
       compiler.compile(page.source, page.file, page.route, page.titleHint),
     );
   }
-  validateDeadLinks(config, pages, compiled);
-  return { pages, sidebar, compiled };
+  validateDeadLinks(config, pages, compiled, notes);
+  return { pages, sidebar, compiled, notes };
 }
 
 async function writeSearchIndex(
@@ -223,7 +238,7 @@ export async function buildSite(
   await fs.rm(config.cacheDir, { recursive: true, force: true });
   await fs.mkdir(config.cacheDir, { recursive: true });
   await linkRuntimeDependencies(config.cacheDir);
-  const { pages, sidebar, compiled } = await prepareBuild(config);
+  const { pages, sidebar, compiled, notes } = await prepareBuild(config);
   await fs.writeFile(
     path.join(config.cacheDir, "entry.ts"),
     `import ${JSON.stringify(path.join(clientRoot, "entry.ts"))}`,
@@ -234,9 +249,9 @@ export async function buildSite(
   );
 
   const plugins = () => [
-    tnotesPlugin(config, sidebar, pages, compiled),
+    tnotesPlugin(config, sidebar, pages, compiled, notes),
     vue({
-      include: [/\.vue$/, /\.md$/],
+      include: [/\.vue$/],
       template: {
         // Markdown-generated HTML references assets relatively (../assets/…);
         // the files are copied verbatim, so asset-URL imports must stay off.
@@ -265,7 +280,15 @@ export async function buildSite(
   const inputs: Record<string, string> = {};
   try {
     for (const page of pages) {
-      const rendered = await renderer.render(page.route);
+      let rendered: { html: string; data: PageData };
+      try {
+        rendered = await renderer.render(page.route);
+      } catch (error) {
+        throw new Error(
+          `渲染页面失败 ${page.route}（${page.file}）：${(error as Error).message}`,
+          { cause: error },
+        );
+      }
       const relative = routeToOutput(page.route);
       const filename = path.join(config.cacheDir, relative);
       await fs.mkdir(path.dirname(filename), { recursive: true });
@@ -307,7 +330,21 @@ export async function buildSite(
   });
   await copyAssets(config);
   await writeSearchIndex(config, pages, compiled);
-  return { config, pageCount: pages.length };
+  await fs.writeFile(
+    path.join(config.outDir, "notes-map.json"),
+    `${JSON.stringify(notes)}\n`,
+  );
+  return { config, pageCount: pages.length, notes };
+}
+
+async function loadNotesMap(config: ResolvedSsgConfig): Promise<NoteRef[]> {
+  try {
+    return JSON.parse(
+      await fs.readFile(path.join(config.outDir, "notes-map.json"), "utf8"),
+    ) as NoteRef[];
+  } catch {
+    return [];
+  }
 }
 
 export async function previewSite(
@@ -316,15 +353,41 @@ export async function previewSite(
   configurePreviewServer?: PreviewServerHook,
 ): Promise<PreviewServer> {
   const config = await resolveConfig(root);
+  const notes = await loadNotesMap(config);
   return vitePreview({
     root: config.root,
     base: config.base,
     configFile: false,
-    plugins: configurePreviewServer
-      ? [{ name: "tnotes-preview-hooks", configurePreviewServer }]
-      : [],
+    plugins: [
+      {
+        name: "tnotes-preview-hooks",
+        configurePreviewServer(preview) {
+          preview.middlewares.use((request, response, next) => {
+            const pathOnly = (request.url ?? "").split("?")[0] ?? "";
+            if (pathOnly.endsWith("/__tnotes_reload")) {
+              next();
+              return;
+            }
+            const canonical = resolveNotePath(pathOnly, notes, config.base);
+            if (!canonical || stripBase(pathOnly, config.base) === canonical) {
+              next();
+              return;
+            }
+            response.statusCode = 302;
+            response.setHeader(
+              "Location",
+              `${config.base}${canonical.slice(1)}`.replace(/\/{2,}/g, "/"),
+            );
+            response.end();
+          });
+          configurePreviewServer?.call(this, preview);
+        },
+      },
+    ],
     preview: {
+      // 4173 by default — 5173 is reserved for Vite / desk `pnpm dev`.
       port: options.port ?? config.port,
+      strictPort: false,
       host: options.host ?? "127.0.0.1",
       open: false,
     },
@@ -332,10 +395,13 @@ export async function previewSite(
   });
 }
 
-export async function createDevServer(root = process.cwd()) {
+export async function createDevServer(
+  root = process.cwd(),
+  options: { port?: number } = {},
+) {
   const first = await buildSite(root, { dev: true });
   const clients = new Set<ServerResponse>();
-  const server = await previewSite(root, {}, (preview) => {
+  const server = await previewSite(root, { port: options.port }, (preview) => {
     preview.middlewares.use((request, response, next) => {
       if (!request.url?.split("?")[0].endsWith("/__tnotes_reload")) {
         next();

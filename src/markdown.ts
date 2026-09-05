@@ -29,6 +29,7 @@ import { full as emoji } from "markdown-it-emoji";
 import markdownItMathjax from "markdown-it-mathjax3";
 import markdownItTaskLists from "markdown-it-task-lists";
 
+import { resolveNoteSlug, type NoteRef } from "./noteRoute";
 import type { PageData, ResolvedSsgConfig } from "./types";
 
 interface MarkdownEnvironment {
@@ -62,6 +63,19 @@ const escapeHtml = (value: string) =>
 
 const bindJson = (value: unknown) =>
   `JSON.parse(decodeURIComponent('${encodeURIComponent(JSON.stringify(value)).replace(/'/g, "%27")}'))`;
+
+const toAbsoluteSpecifier = (specifier: string, fromFile: string) =>
+  path
+    .resolve(path.dirname(fromFile), specifier)
+    .replaceAll("\\", "/");
+
+/** Anchor relative import/export specifiers to the note file's directory. */
+const resolveRelativeSpecifiers = (source: string, fromFile: string) =>
+  source.replace(
+    /(\bfrom\s*|^\s*import\s*|\bimport\s*\(\s*)(['"])(\.{1,2}\/[^'"]+)\2/gm,
+    (whole, prefix: string, quote: string, specifier: string) =>
+      `${prefix}${quote}${toAbsoluteSpecifier(specifier, fromFile)}${quote}`,
+  );
 
 const slugger = new GithubSlugger();
 /** GitHub-style anchors — must stay identical to the legacy VitePress sites. */
@@ -362,14 +376,35 @@ function rewriteAssetSrc(src: string, base: string): string {
   return match ? `${base}assets/${match[1]}` : src;
 }
 
-function configureLinks(md: MarkdownIt, base: string) {
+function rewriteNoteHref(href: string, notes: readonly NoteRef[], base: string) {
+  const queryAt = href.search(/[?#]/);
+  const pathPart = queryAt < 0 ? href : href.slice(0, queryAt);
+  const suffix = queryAt < 0 ? "" : href.slice(queryAt);
+  const slug = pathPart
+    .replace(/\.md$/i, "")
+    .split("/")
+    .filter(Boolean)
+    .pop();
+  if (!slug) return null;
+  const route = resolveNoteSlug(slug, notes);
+  return route ? `${base}${route.slice(1)}${suffix}` : null;
+}
+
+function configureLinks(
+  md: MarkdownIt,
+  base: string,
+  notes: readonly NoteRef[],
+) {
   const fallback = md.renderer.rules.link_open;
   md.renderer.rules.link_open = (tokens, index, options, env, self) => {
     const token = tokens[index];
     const hrefIndex = token.attrIndex("href");
     if (hrefIndex >= 0) {
       const href = token.attrs![hrefIndex][1];
-      if (href.startsWith("/") && !href.startsWith("//")) {
+      const canonical = rewriteNoteHref(href, notes, base);
+      if (canonical) {
+        token.attrs![hrefIndex][1] = canonical;
+      } else if (href.startsWith("/") && !href.startsWith("//")) {
         token.attrs![hrefIndex][1] = `${base}${href.slice(1)}`.replace(
           /\.md(?=([?#]|$))/i,
           "",
@@ -407,7 +442,10 @@ function configureImages(md: MarkdownIt, base: string, lazy: boolean) {
 
 /* ------------------------------- compiler -------------------------------- */
 
-export async function createMarkdownCompiler(config: ResolvedSsgConfig) {
+export async function createMarkdownCompiler(
+  config: ResolvedSsgConfig,
+  notes: readonly NoteRef[] = [],
+) {
   const md = new MarkdownIt({ html: true, linkify: true, typographer: false });
   // Save the raw source for container fallbacks (footprints).
   md.core.ruler.before("normalize", "save-source", (state) => {
@@ -424,7 +462,7 @@ export async function createMarkdownCompiler(config: ResolvedSsgConfig) {
   configureContainers(md);
   configureSwiperContainer(md, config.base);
   configureFootprintsContainer(md, config.base);
-  configureLinks(md, config.base);
+  configureLinks(md, config.base, notes);
   configureImages(md, config.base, config.markdown.imageLazyLoading);
   configureCodeBlocks(md, config.markdown.lineNumbers);
   configureMermaidFence(md);
@@ -469,8 +507,20 @@ export async function createMarkdownCompiler(config: ResolvedSsgConfig) {
         text,
         frontmatter: parsed.data,
       };
-      const scripts = env.sfcBlocks?.scripts.map((item) => item.content) ?? [];
-      const styles = env.sfcBlocks?.styles.map((item) => item.content) ?? [];
+      // Page modules are virtual (see vitePlugin), so relative specifiers in
+      // hoisted SFC blocks must be anchored to the note file's directory.
+      const scripts =
+        env.sfcBlocks?.scripts.map((item) =>
+          resolveRelativeSpecifiers(item.content, file),
+        ) ?? [];
+      const styles =
+        env.sfcBlocks?.styles.map((item) =>
+          item.content.replace(
+            /@import\s+(['"])(\.{1,2}\/[^'"]+)\1/g,
+            (whole, quote: string, specifier: string) =>
+              `@import ${quote}${toAbsoluteSpecifier(specifier, file)}${quote}`,
+          ),
+        ) ?? [];
       const customBlocks =
         env.sfcBlocks?.customBlocks.map((item) => item.content) ?? [];
       const pageExport = `<script>export const __pageData = ${JSON.stringify(data)}; export default { name: ${JSON.stringify(relativePath)} }</script>`;
