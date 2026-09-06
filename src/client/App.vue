@@ -19,10 +19,16 @@
       <main class="tn-site-main">
         <component :is="page" />
       </main>
-      <aside v-if="data.headings.length" class="tn-site-outline">
+      <aside v-if="outlineHeadings.length" class="tn-site-outline">
         <strong>本页目录</strong>
         <ul>
-          <li v-for="heading in data.headings" :key="heading">{{ heading }}</li>
+          <li
+            v-for="heading in outlineHeadings"
+            :key="heading.id"
+            :data-level="heading.level"
+          >
+            <a :href="`#${heading.id}`">{{ heading.text }}</a>
+          </li>
         </ul>
       </aside>
     </div>
@@ -55,13 +61,15 @@
 </template>
 
 <script setup lang="ts">
+import GithubSlugger from "github-slugger";
 import MiniSearch from "minisearch";
 import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { hydrateTnSwipers } from "@tnotesjs/ui/swiper";
 import site from "virtual:tnotes-site";
 
 import SidebarTree from "./components/SidebarTree.vue";
 import { normalizeSearchTerm, tokenizeSearch } from "./search";
-import type { PageData } from "../types";
+import type { PageData, PageHeading } from "../types";
 
 const props = defineProps<{
   page: object;
@@ -70,6 +78,17 @@ const props = defineProps<{
 }>();
 
 type SearchResult = Pick<PageData, "route" | "title" | "text">;
+
+/** Accept structured headings, or legacy string[] from an older ssg build. */
+const outlineHeadings = computed<PageHeading[]>(() => {
+  const slugger = new GithubSlugger();
+  return props.data.headings.map((item, index) => {
+    if (typeof item === "string") {
+      return { text: item, level: 2, id: slugger.slug(item) || `heading-${index + 1}` };
+    }
+    return item;
+  });
+});
 
 const searchOpen = ref(false);
 const searching = ref(false);
@@ -96,6 +115,13 @@ const toggleTheme = () => {
   localStorage.setItem("tnotes-theme", next);
 };
 
+function hydratePageSwipers(): void {
+  void nextTick(() => {
+    const main = document.querySelector(".tn-site-main");
+    if (main) hydrateTnSwipers(main);
+  });
+}
+
 watch(searchOpen, async (open) => {
   if (!open) return;
   await nextTick();
@@ -118,9 +144,15 @@ watch(searchOpen, async (open) => {
   }
 });
 
+watch(
+  () => props.route,
+  () => hydratePageSwipers(),
+);
+
 onMounted(() => {
   const theme = localStorage.getItem("tnotes-theme");
   if (theme)
     document.documentElement.classList.toggle("dark", theme === "dark");
+  hydratePageSwipers();
 });
 </script>

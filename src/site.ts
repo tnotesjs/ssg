@@ -213,8 +213,17 @@ async function writeSearchIndex(
       seenFiles.add(page.file);
       return true;
     })
-    .map((page) => compiled.get(`${page.file}:${page.route}`)!.data);
-  search.addAll(documents);
+    .map((page) => {
+      const data = compiled.get(`${page.file}:${page.route}`)!.data;
+      return {
+        ...data,
+        // MiniSearch indexes string fields; flatten structured outline headings.
+        headings: data.headings
+          .map((heading) => (typeof heading === "string" ? heading : heading.text))
+          .join(" "),
+      };
+    });
+  search.addAll(documents as unknown as PageData[]);
   await fs.writeFile(
     path.join(config.outDir, "search-index.json"),
     JSON.stringify(search),

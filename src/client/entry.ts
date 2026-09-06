@@ -1,6 +1,7 @@
 import "@tnotesjs/ui/styles/tokens.css";
 import "@tnotesjs/ui/styles/prose.css";
 import "@tnotesjs/ui/styles/code.css";
+import "@tnotesjs/ui/styles/swiper.css";
 import "./theme.css";
 
 import site from "virtual:tnotes-site";

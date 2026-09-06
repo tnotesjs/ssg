@@ -5,12 +5,19 @@ export interface SidebarItem {
   collapsed?: boolean;
 }
 
+export interface PageHeading {
+  text: string;
+  level: number;
+  id: string;
+}
+
 export interface PageData {
   route: string;
   relativePath: string;
   title: string;
   description: string;
-  headings: string[];
+  /** Structured outline entries. Older builds may still emit plain strings. */
+  headings: Array<PageHeading | string>;
   text: string;
   frontmatter: Record<string, unknown>;
 }

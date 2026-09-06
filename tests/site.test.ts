@@ -61,7 +61,9 @@ const message = 'Vue SFC works'
 
 [阅读指南](./0002.%20指南.md)
 
-![图片](../assets/pic.txt)
+![图片](../assets/pic.txt) {w=50%}
+
+![](../assets/pic.txt)
 `,
   );
   write(
@@ -119,6 +121,9 @@ describe("static site build", () => {
     expect(home).toContain('href="/fixture/notes/2"');
     // Asset references are rewritten to base-absolute (assets/ copied verbatim).
     expect(home).toContain('src="/fixture/assets/pic.txt"');
+    expect(home).toContain('<figure class="tn-image">');
+    expect(home).toContain("<figcaption>图片</figcaption>");
+    expect(home).toContain("width:50%");
     expect(fs.existsSync(dist("404.html"))).toBe(true);
   });
 
@@ -209,6 +214,27 @@ describe("dead links", () => {
       await expect(buildSite(invalidRoot)).rejects.toThrow("dead link");
     } finally {
       fs.rmSync(invalidRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("does not fail when fenced code looks like a markdown link", async () => {
+    const validRoot = fs.mkdtempSync(
+      path.join(os.tmpdir(), "tnotes-ssg-codelink-"),
+    );
+    try {
+      const w = (rel: string, content: string) => {
+        const file = path.join(validRoot, rel);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, content);
+      };
+      w("TOC.md", "- [ ] 0001. 首页\n");
+      w(
+        "notes/0001. 首页.md",
+        "# 首页\n\n```ts\nif (prefix === '[' && suffix.startsWith('](')) {}\n```\n",
+      );
+      await buildSite(validRoot);
+    } finally {
+      fs.rmSync(validRoot, { recursive: true, force: true });
     }
   });
 });

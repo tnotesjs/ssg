@@ -13,6 +13,10 @@ import { frontmatterPlugin } from "@mdit-vue/plugin-frontmatter";
 import { sfcPlugin } from "@mdit-vue/plugin-sfc";
 import { highlightCodeSync, prepareCodeHighlighter } from "@tnotesjs/ui/code";
 import {
+  parseImageAttrs,
+  type ImageAlign,
+} from "@tnotesjs/ui/image-markdown";
+import {
   parseFootprintsDatetime,
   parseFootprintsSource,
 } from "@tnotesjs/ui/footprints-parse";
@@ -100,6 +104,17 @@ export function collectCodeLanguages(sources: string[]) {
     }
   }
   return [...values];
+}
+
+/** Prose markdown links only — fenced and inline code must not fail the build. */
+export function extractMarkdownLinks(raw: string): string[] {
+  const withoutCode = raw
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/~~~[\s\S]*?~~~/g, " ")
+    .replace(/`[^`\n]+`/g, " ");
+  return [...withoutCode.matchAll(/(?<!!)\[[^\]]*\]\(([^)\s]+)(?:\s+[^)]*)?\)/g)].map(
+    (match) => match[1],
+  );
 }
 
 /* ------------------------------ containers ------------------------------ */
@@ -424,6 +439,28 @@ function configureLinks(
 
 function configureImages(md: MarkdownIt, base: string, lazy: boolean) {
   const fallback = md.renderer.rules.image;
+  md.core.ruler.after("inline", "tn-image-figure", (state) => {
+    const tokens = state.tokens;
+    for (let index = 0; index < tokens.length; index += 1) {
+      if (tokens[index].type !== "paragraph_open") continue;
+      const inline = tokens[index + 1];
+      const close = tokens[index + 2];
+      if (inline?.type !== "inline" || close?.type !== "paragraph_close")
+        continue;
+      const marked = markStandaloneImage(inline);
+      if (!marked) continue;
+      tokens[index].tag = "figure";
+      tokens[index].attrJoin("class", "tn-image");
+      if (marked.align !== "left") {
+        tokens[index].attrJoin("class", `tn-image--${marked.align}`);
+      }
+      if (marked.width) {
+        tokens[index].attrSet("style", `width:${marked.width};max-width:100%`);
+      }
+      close.tag = "figure";
+    }
+    return true;
+  });
   md.renderer.rules.image = (tokens, index, options, env, self) => {
     const token = tokens[index];
     const srcIndex = token.attrIndex("src");
@@ -434,10 +471,52 @@ function configureImages(md: MarkdownIt, base: string, lazy: boolean) {
       );
     }
     if (lazy) token.attrSet("loading", "lazy");
-    return fallback
+    const width = token.attrGet("data-tn-w");
+    if (token.attrGet("data-tn-figure") === "1") {
+      if (width) token.attrSet("style", "width:100%;max-width:100%;height:auto");
+    } else if (width) {
+      token.attrSet("style", `width:${width};max-width:100%;height:auto`);
+    }
+    const html = fallback
       ? fallback(tokens, index, options, env, self)
       : self.renderToken(tokens, index, options);
+    const caption = token.content.trim();
+    if (token.attrGet("data-tn-figure") === "1" && caption) {
+      return `${html}<figcaption>${escapeHtml(caption)}</figcaption>`;
+    }
+    return html;
   };
+}
+
+function markStandaloneImage(inline: {
+  children?: Array<{
+    type: string;
+    content: string;
+    hidden?: boolean;
+    attrSet?: (name: string, value: string) => void;
+  }> | null;
+}): { align: ImageAlign; width: string } | false {
+  const children = inline.children ?? [];
+  const meaningful = children.filter(
+    (token) => token.type === "image" || (token.type === "text" && token.content.trim()),
+  );
+  if (meaningful[0]?.type !== "image") return false;
+  const image = meaningful[0];
+  let width = "";
+  let align: ImageAlign = "left";
+  if (meaningful.length === 2 && meaningful[1].type === "text") {
+    const parsed = parseImageAttrs(meaningful[1].content);
+    if (parsed.rest) return false;
+    width = parsed.width;
+    align = parsed.align;
+    meaningful[1].hidden = true;
+    meaningful[1].content = "";
+  } else if (meaningful.length !== 1) {
+    return false;
+  }
+  image.attrSet?.("data-tn-figure", "1");
+  if (width) image.attrSet?.("data-tn-w", width);
+  return { align, width };
 }
 
 /* ------------------------------- compiler -------------------------------- */
@@ -486,9 +565,11 @@ export async function createMarkdownCompiler(
         String(titleHint || parsed.data.title || titleMatch?.[1] || route),
       );
       const description = String(parsed.data.description ?? "");
-      const headings = [...raw.matchAll(/^#{2,6}\s+(.+)$/gm)].map((match) =>
-        match[1].replace(/[*_`]/g, "").trim(),
-      );
+      const headings = [...raw.matchAll(/^(#{2,6})\s+(.+)$/gm)].map((match) => {
+        const level = match[1].length;
+        const text = plainInline(match[2] ?? "");
+        return { text, level, id: slugify(text) };
+      });
       const text = parsed.content
         .replace(/```[\s\S]*?```/g, " ")
         .replace(/<[^>]+>/g, " ")
@@ -531,9 +612,7 @@ export async function createMarkdownCompiler(
         ...styles,
         ...customBlocks,
       ].join("\n");
-      const links = [
-        ...raw.matchAll(/(?<!!)\[[^\]]*\]\(([^)\s]+)(?:\s+[^)]*)?\)/g),
-      ].map((match) => match[1]);
+      const links = extractMarkdownLinks(raw);
       return { vueSource, html, data, links };
     },
   };
