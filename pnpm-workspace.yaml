@@ -4,7 +4,3 @@ allowBuilds:
 onlyBuiltDependencies:
   - esbuild
   - '@parcel/watcher'
-overrides:
-  # 开发期指向本地源码（含未发布版本）；发版前移除。
-  '@tnotesjs/ui': 'link:../ui'
-  '@tnotesjs/kb': 'link:../kb'
