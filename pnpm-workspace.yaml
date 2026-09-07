@@ -4,3 +4,6 @@ allowBuilds:
 onlyBuiltDependencies:
   - esbuild
   - '@parcel/watcher'
+minimumReleaseAgeExclude:
+  - '@tnotesjs/ui'
+  - '@tnotesjs/kb'
