@@ -394,7 +394,7 @@ export async function previewSite(
       },
     ],
     preview: {
-      // 4173 by default — 5173 is reserved for Vite / desk `pnpm dev`.
+      // 9193 by default — 5173 is reserved for Vite / desk `pnpm dev`.
       port: options.port ?? config.port,
       strictPort: false,
       host: options.host ?? "127.0.0.1",
