@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   collectCodeLanguages,
   createMarkdownCompiler,
+  escapeVueMustaches,
   extractMarkdownLinks,
 } from "../src/markdown";
 
@@ -114,5 +115,29 @@ describe("Markdown compatibility helpers", () => {
     ]);
     expect(html).toContain('id="建议按这个顺序点"');
     expect(html).toContain('id="小节"');
+  });
+
+  it("treats markdown mustaches as literal text, not Vue interpolations", async () => {
+    expect(escapeVueMustaches("{{ n }}")).toBe("&#123;&#123; n &#125;&#125;");
+    const compiler = await createMarkdownCompiler(compilerConfig);
+    const { html, vueSource } = compiler.compile(
+      [
+        "inline `{{ count }}`",
+        "",
+        "prose {{ n }}",
+        "",
+        "<span>{{ live }}</span>",
+        "",
+      ].join("\n"),
+      "/notes/n.md",
+      "/n",
+      "n",
+    );
+    expect(html).toContain("&#123;&#123; count &#125;&#125;");
+    expect(html).toContain("&#123;&#123; n &#125;&#125;");
+    expect(html).toContain("&#123;&#123; live &#125;&#125;");
+    expect(html).not.toMatch(/\{\{/);
+    const template = vueSource.slice(vueSource.indexOf("<template>"));
+    expect(template).not.toMatch(/\{\{/);
   });
 });

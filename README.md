@@ -22,5 +22,12 @@ tnotes-ssg preview
 ```
 
 Supported compatibility boundaries are covered by fixtures: Markdown with Vue
-SFC blocks and components, external snippets, base paths, dead-link checks,
-local search, math, containers, shared Shiki code blocks and static HTML output.
+SFC blocks and components, literal `{{ }}` in prose (not live interpolations),
+base paths, dead-link checks, local search, math, containers, shared Shiki code
+blocks and static HTML output.
+
+Markdown notes are documents. `{{` / `}}` in the body, inline code, and raw HTML
+are encoded so Vue's template compiler leaves them alone — the same characters
+show in Desk, GitHub, and the published site. Interactive values belong in a
+sibling `.vue` file or a component prop (`:text="message"`), not in `{{ n }}`
+written into the Markdown.

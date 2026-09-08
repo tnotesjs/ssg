@@ -65,6 +65,18 @@ const escapeHtml = (value: string) =>
     return values[character];
   });
 
+/**
+ * Markdown body is a document, not a Vue template. `{{` / `}}` in prose,
+ * inline code, and raw HTML must render as literals (same as Desk / GitHub).
+ * Live interpolations belong in sibling `.vue` files or component props.
+ *
+ * Encode as numeric entities so Vue's compiler does not treat them as
+ * mustaches; the browser still displays `{{ }}`.
+ */
+export function escapeVueMustaches(html: string): string {
+  return html.replaceAll("{{", "&#123;&#123;").replaceAll("}}", "&#125;&#125;");
+}
+
 const bindJson = (value: unknown) =>
   `JSON.parse(decodeURIComponent('${encodeURIComponent(JSON.stringify(value)).replace(/'/g, "%27")}'))`;
 
@@ -560,7 +572,7 @@ export async function createMarkdownCompiler(
       titleHint?: string,
     ): CompiledMarkdown {
       const env: MarkdownEnvironment = { source: raw };
-      const html = md.render(raw, env);
+      const html = escapeVueMustaches(md.render(raw, env));
       const parsed = matter(raw);
       const titleMatch = raw.match(/^#\s+(.+)$/m);
       const title = plainInline(

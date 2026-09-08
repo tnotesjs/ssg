@@ -94,7 +94,7 @@ graph TD
 ::: footprints 2026-09-06 12:00
 一段足迹正文。
 :::
-`,
+` + "\n行内 `{{ count }}`。正文 {{ n }}。\n",
   );
   write("assets/pic.txt", "asset file");
   write("public/fixture.txt", "public asset");
@@ -141,6 +141,12 @@ describe("static site build", () => {
     expect(guide).toMatch(/tn-mindmap|mindmap/i);
     expect(guide).toContain("一段足迹正文。");
     expect(guide).toContain("mjx"); // mathjax
+  });
+
+  it("renders markdown mustaches as visible text", () => {
+    const guide = fs.readFileSync(dist("notes/2.html"), "utf8");
+    expect(guide).toMatch(/\{\{\s*count\s*\}\}|&#123;&#123;\s*count\s*&#125;&#125;/);
+    expect(guide).toMatch(/\{\{\s*n\s*\}\}|&#123;&#123;\s*n\s*&#125;&#125;/);
   });
 
   it("copies library assets and public files into dist", () => {
