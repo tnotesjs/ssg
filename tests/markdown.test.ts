@@ -64,6 +64,20 @@ describe("Markdown compatibility helpers", () => {
     expect(html).toContain("<figcaption>说明</figcaption>");
   });
 
+  it("wraps a tight-list image in figure so the caption can center", async () => {
+    const compiler = await createMarkdownCompiler(compilerConfig);
+    const { html } = compiler.compile(
+      ["- first", "- ![图 0](https://example.com/pic.png)", ""].join("\n"),
+      "n.md",
+      "/n",
+      "n",
+    );
+    expect(html).toContain('<figure class="tn-image">');
+    expect(html).toContain("<figcaption>图 0</figcaption>");
+    expect(html).toMatch(/<li>\s*<figure class="tn-image">/);
+    expect(html).not.toMatch(/<li>\s*<img /);
+  });
+
   it("renders tip/info/warning/danger/details as typed custom blocks", async () => {
     const compiler = await createMarkdownCompiler(compilerConfig);
     const { html } = compiler.compile(

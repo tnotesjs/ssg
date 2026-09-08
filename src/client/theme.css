@@ -94,9 +94,11 @@ body {
   font-weight: 600;
 }
 .tn-site-main {
+  min-width: 0;
   width: min(100%, 980px);
   margin: 0 auto;
   padding: 48px 44px 96px;
+  overflow-wrap: anywhere;
 }
 .tn-site-outline {
   position: sticky;

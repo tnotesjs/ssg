@@ -6,7 +6,7 @@ import "./theme.css";
 
 import site from "virtual:tnotes-site";
 
-import { resolveNotePath, stripBase } from "../noteRoute";
+import { resolveNotePath, stripBase } from "./noteRoute";
 import { createSiteApp } from "./runtime";
 
 const canonical = resolveNotePath(location.pathname, site.notes, site.base);

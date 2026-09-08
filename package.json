@@ -1,6 +1,6 @@
 {
   "name": "@tnotesjs/ssg",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "A small static-site generator built for TNotes knowledge bases.",
   "type": "module",
   "packageManager": "pnpm@11.10.0",
@@ -16,6 +16,7 @@
   "files": [
     "dist/",
     "src/client/",
+    "src/types.ts",
     "src/env.d.ts",
     "README.md",
     "LICENSE"

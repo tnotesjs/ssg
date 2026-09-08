@@ -450,6 +450,7 @@ function configureImages(md: MarkdownIt, base: string, lazy: boolean) {
       const marked = markStandaloneImage(inline);
       if (!marked) continue;
       tokens[index].tag = "figure";
+      tokens[index].hidden = false;
       tokens[index].attrJoin("class", "tn-image");
       if (marked.align !== "left") {
         tokens[index].attrJoin("class", `tn-image--${marked.align}`);
@@ -458,6 +459,7 @@ function configureImages(md: MarkdownIt, base: string, lazy: boolean) {
         tokens[index].attrSet("style", `width:${marked.width};max-width:100%`);
       }
       close.tag = "figure";
+      close.hidden = false;
     }
     return true;
   });

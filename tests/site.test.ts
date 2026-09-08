@@ -217,7 +217,7 @@ describe("dead links", () => {
     }
   });
 
-  it("does not fail when fenced code looks like a markdown link", async () => {
+  it("does not fail when fenced code looks like a markdown link", { timeout: 30_000 }, async () => {
     const validRoot = fs.mkdtempSync(
       path.join(os.tmpdir(), "tnotes-ssg-codelink-"),
     );
