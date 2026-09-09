@@ -159,29 +159,44 @@ function injectDevStyles(html: string, tags: string): string {
   return next;
 }
 
-function clientAssetTags(base: string, manifest: Manifest): string {
+function clientAssetTags(
+  base: string,
+  manifest: Manifest,
+): { styles: string; script: string } {
   const entry = Object.values(manifest).find((chunk) => chunk.isEntry);
   if (!entry) {
     throw new Error("Vite manifest is missing the client entry");
   }
-  const links = (entry.css ?? []).map(
-    (href) => `<link rel="stylesheet" href="${joinBase(base, href)}" />`,
-  );
-  return [
-    ...links,
-    `<script type="module" src="${joinBase(base, entry.file)}"></script>`,
-  ].join("\n    ");
+  const styles = (entry.css ?? [])
+    .map((href) => `<link rel="stylesheet" href="${joinBase(base, href)}" />`)
+    .join("\n    ");
+  return {
+    styles,
+    script: `<script type="module" src="${joinBase(base, entry.file)}"></script>`,
+  };
 }
 
-function applyClientAssets(html: string, tags: string): string {
-  const next = html.replace(
-    /<script type="module" src="[^"]*entry\.ts"><\/script>/,
-    tags,
-  );
+/**
+ * Stylesheets belong in <head>: injected at the body's end (with the script)
+ * they are discovered after the whole SSR page parses, so first paint happens
+ * unstyled — a visible flash on every load.
+ */
+function applyClientAssets(
+  html: string,
+  tags: { styles: string; script: string },
+): string {
+  const next = html.replace("</head>", `    ${tags.styles}\n  </head>`);
   if (next === html) {
+    throw new Error("Failed to inject client styles into HTML (</head> missing)");
+  }
+  const withScript = next.replace(
+    /<script type="module" src="[^"]*entry\.ts"><\/script>/,
+    tags.script,
+  );
+  if (withScript === next) {
     throw new Error("Failed to inject client assets into HTML (entry.ts script tag missing)");
   }
-  return next;
+  return withScript;
 }
 
 function resolveInternalRoute(raw: string, currentRoute: string) {

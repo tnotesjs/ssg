@@ -183,6 +183,11 @@ describe("static site build", () => {
     expect(home).not.toContain("entry.ts");
     expect(home).toMatch(/<script type="module" src="\/fixture\/_chunks\/[^"]+\.js"><\/script>/);
     expect(home).toMatch(/<link rel="stylesheet" href="\/fixture\/_chunks\/[^"]+\.css" \/>/);
+    // Stylesheets must land in <head> — at the body's end they are discovered
+    // after the SSR page parses and first paint flashes unstyled content.
+    const head = home.slice(0, home.indexOf("</head>"));
+    expect(head).toContain('rel="stylesheet"');
+    expect(home.indexOf('rel="stylesheet"')).toBeLessThan(home.indexOf("<body>"));
     const homeScript = home.match(/<script type="module" src="([^"]+)"><\/script>/)?.[1];
     const guideScript = guide.match(/<script type="module" src="([^"]+)"><\/script>/)?.[1];
     expect(homeScript).toBe(guideScript);
