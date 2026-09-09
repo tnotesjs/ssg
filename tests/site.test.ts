@@ -259,6 +259,13 @@ describe("static site build", () => {
       const head = html.slice(0, html.indexOf("</head>"));
       expect(head).toContain("<style>");
       expect(head).toContain("--tn-c-");
+      // Asset URLs already carry the base; Vite's transformIndexHtml would
+      // prepend it again (/fixture/fixture/assets/...), so dev must not
+      // rebase. The HMR client and entry script are injected manually.
+      expect(html).toContain('src="/fixture/assets/pic.txt"');
+      expect(html).not.toContain("/fixture/fixture/");
+      expect(html).toContain('src="/fixture/@vite/client"');
+      expect(html).toContain('src="/fixture/entry.ts"');
     } finally {
       await server.close();
     }

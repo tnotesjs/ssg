@@ -163,6 +163,28 @@ function injectDevStyles(html: string, tags: string): string {
   return next;
 }
 
+/**
+ * Dev replacement for vite.transformIndexHtml: swap the entry placeholder for
+ * the HMR client + entry script, both base-prefixed. We cannot use Vite's
+ * hook because it rebases *every* root-absolute src/href in the document —
+ * our SSR HTML already includes the base, so assets ended up at
+ * /base/base/assets/... and 404'd.
+ */
+function injectDevClient(html: string, base: string): string {
+  const tags = [
+    `<script type="module" src="${joinBase(base, "@vite/client")}"></script>`,
+    `<script type="module" src="${joinBase(base, "entry.ts")}"></script>`,
+  ].join("\n    ");
+  const next = html.replace(
+    /<script type="module" src="[^"]*entry\.ts"><\/script>/,
+    () => tags,
+  );
+  if (next === html) {
+    throw new Error("Failed to inject dev client (entry.ts script tag missing)");
+  }
+  return next;
+}
+
 function clientAssetTags(
   base: string,
   manifest: Manifest,
@@ -811,17 +833,20 @@ export async function createDevServer(
                       response.end(session.searchIndexJson);
                       return;
                     }
-                    if (isViteHandledPath(pathOnly)) {
-                      next();
-                      return;
-                    }
                     if (relative.startsWith("/assets/")) {
+                      // KB files are served by us, not Vite — this must run
+                      // before isViteHandledPath, which claims .svg/.png/...
+                      // for Vite's pipeline (where they can only 404).
                       sendKbFile(
                         response,
                         path.join(config.root, relative),
                         config.root,
                         next,
                       );
+                      return;
+                    }
+                    if (isViteHandledPath(pathOnly)) {
+                      next();
                       return;
                     }
                     const leaf = relative.split("/").pop() ?? "";
@@ -859,9 +884,13 @@ export async function createDevServer(
                       session,
                       route,
                     );
-                    const transformed = await vite.transformIndexHtml(
-                      pathOnly,
+                    // No vite.transformIndexHtml: our SSR HTML already carries
+                    // the base in every URL, and Vite's dev hook prepends base
+                    // to all root-absolute src/href again (img assets 404'd as
+                    // /base/base/assets/...). Inject the dev client ourselves.
+                    const transformed = injectDevClient(
                       injectDevStyles(html, styleTags),
+                      config.base,
                     );
                     response.statusCode = route === "/404" && current !== "/404" ? 404 : 200;
                     response.setHeader(
