@@ -586,7 +586,9 @@ async function createDevSession(config: ResolvedSsgConfig): Promise<DevSession> 
   const notes = notesFromSnapshot(snapshot);
   await ensure404Page(config, pages);
   const compiler = await createMarkdownCompiler(config, notes);
-  await compiler.prepare(pages.map((page) => page.source));
+  // No upfront compiler.prepare: scanning every note for code languages takes
+  // ~90s at leetcode scale. renderDevPage prepares per page on first compile;
+  // the highlighter loads languages incrementally, so repeat calls are cheap.
   const store = new PageSourceStore();
   store.sidebar = sidebar;
   store.notes = notes;
@@ -696,6 +698,8 @@ async function renderDevPage(
   let data = session.store.getCompiledData(source.route);
   let html = session.store.getHtml(source.route);
   if (!data || html === undefined) {
+    // Lazy per-page prepare: loads only this page's code languages.
+    await session.compiler.prepare([source.source]);
     const compiled = session.compiler.compile(
       source.source,
       source.file,
