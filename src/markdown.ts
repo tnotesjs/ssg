@@ -559,6 +559,49 @@ function markStandaloneImage(inline: {
   return { align, width };
 }
 
+/**
+ * Title/description/headings/text for search and <head>. Pure frontmatter +
+ * regex extraction — deliberately independent of md.render so the dev server
+ * can build a search index without paying for rendering (or Shiki).
+ */
+export function extractPageData(
+  config: ResolvedSsgConfig,
+  raw: string,
+  file: string,
+  route: string,
+  titleHint?: string,
+): PageData {
+  const parsed = matter(raw);
+  const titleMatch = raw.match(/^#\s+(.+)$/m);
+  const title = plainInline(
+    String(titleHint || parsed.data.title || titleMatch?.[1] || route),
+  );
+  const description = String(parsed.data.description ?? "");
+  const headings = [...raw.matchAll(/^(#{2,6})\s+(.+)$/gm)].map((match) => {
+    const level = match[1].length;
+    const text = plainInline(match[2] ?? "");
+    return { text, level, id: slugify(text) };
+  });
+  const text = parsed.content
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/[#>*_`[\]()!-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const relativePath = path
+    .relative(config.root, file)
+    .replaceAll("\\", "/");
+  return {
+    route,
+    relativePath,
+    title,
+    description,
+    headings,
+    text,
+    frontmatter: parsed.data,
+  };
+}
+
 /* ------------------------------- compiler -------------------------------- */
 
 export async function createMarkdownCompiler(
@@ -599,35 +642,7 @@ export async function createMarkdownCompiler(
     ): CompiledMarkdown {
       const env: MarkdownEnvironment = { source: raw };
       const html = escapeVueMustaches(md.render(raw, env));
-      const parsed = matter(raw);
-      const titleMatch = raw.match(/^#\s+(.+)$/m);
-      const title = plainInline(
-        String(titleHint || parsed.data.title || titleMatch?.[1] || route),
-      );
-      const description = String(parsed.data.description ?? "");
-      const headings = [...raw.matchAll(/^(#{2,6})\s+(.+)$/gm)].map((match) => {
-        const level = match[1].length;
-        const text = plainInline(match[2] ?? "");
-        return { text, level, id: slugify(text) };
-      });
-      const text = parsed.content
-        .replace(/```[\s\S]*?```/g, " ")
-        .replace(/<[^>]+>/g, " ")
-        .replace(/[#>*_`[\]()!-]/g, " ")
-        .replace(/\s+/g, " ")
-        .trim();
-      const relativePath = path
-        .relative(config.root, file)
-        .replaceAll("\\", "/");
-      const data: PageData = {
-        route,
-        relativePath,
-        title,
-        description,
-        headings,
-        text,
-        frontmatter: parsed.data,
-      };
+      const data = extractPageData(config, raw, file, route, titleHint);
       // Page modules are virtual (see vitePlugin), so relative specifiers in
       // hoisted SFC blocks must be anchored to the note file's directory.
       const scripts =
@@ -648,7 +663,7 @@ export async function createMarkdownCompiler(
         scripts.length > 0 || styles.length > 0 || customBlocks.length > 0;
       const vueSource = hasUserSfc
         ? [
-            `<script>export const __pageData = ${JSON.stringify(data)}; export default { name: ${JSON.stringify(relativePath)} }</script>`,
+            `<script>export const __pageData = ${JSON.stringify(data)}; export default { name: ${JSON.stringify(data.relativePath)} }</script>`,
             ...scripts,
             `<template><div class="tn-prose">${html}</div></template>`,
             ...styles,

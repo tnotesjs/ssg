@@ -18,7 +18,7 @@ import {
 
 import { resolveConfig } from "./config";
 import { normalizeSearchTerm, tokenizeSearch } from "./client/search";
-import { createMarkdownCompiler, extractMarkdownLinks } from "./markdown";
+import { createMarkdownCompiler, extractMarkdownLinks, extractPageData } from "./markdown";
 import {
   resolveNotePath,
   resolveNoteSlug,
@@ -345,10 +345,9 @@ async function createSsrVite(
   });
 }
 
-async function writeSearchIndex(
-  config: ResolvedSsgConfig,
+function serializeSearchIndex(
   entries: Array<{ file: string; route: string; data: PageData }>,
-) {
+): string {
   const search = new MiniSearch<PageData>({
     idField: "route",
     fields: ["title", "headings", "text"],
@@ -373,9 +372,16 @@ async function writeSearchIndex(
         .join(" "),
     }));
   search.addAll(documents as unknown as PageData[]);
+  return JSON.stringify(search);
+}
+
+async function writeSearchIndex(
+  config: ResolvedSsgConfig,
+  entries: Array<{ file: string; route: string; data: PageData }>,
+) {
   await fs.writeFile(
     path.join(config.outDir, "search-index.json"),
-    JSON.stringify(search),
+    serializeSearchIndex(entries),
   );
 }
 
@@ -583,6 +589,8 @@ interface DevSession {
   byFile: Map<string, SourcePage>;
   store: PageSourceStore;
   compiler: Awaited<ReturnType<typeof createMarkdownCompiler>>;
+  /** Lazily serialized MiniSearch index; reset whenever watched files change. */
+  searchIndexJson?: string;
 }
 
 async function createDevSession(config: ResolvedSsgConfig): Promise<DevSession> {
@@ -774,11 +782,39 @@ export async function createDevServer(
                     const pathOnly = decodeURIComponent(
                       (request.url ?? "/").split("?")[0] ?? "/",
                     );
+                    const relative = stripBase(pathOnly, config.base);
+                    // Must run before isViteHandledPath: ".json" is claimed
+                    // by Vite's module pipeline, which knows nothing about
+                    // the search index and would 404 it.
+                    if (relative === "/search-index.json") {
+                      // Built lazily from cheap PageData extraction (no
+                      // markdown render / Shiki), cached until the watcher
+                      // reports a change.
+                      session.searchIndexJson ??= serializeSearchIndex(
+                        session.pages.map((page) => ({
+                          file: page.file,
+                          route: page.route,
+                          data: extractPageData(
+                            config,
+                            page.source,
+                            page.file,
+                            page.route,
+                            page.titleHint,
+                          ),
+                        })),
+                      );
+                      response.statusCode = 200;
+                      response.setHeader(
+                        "Content-Type",
+                        "application/json;charset=utf-8",
+                      );
+                      response.end(session.searchIndexJson);
+                      return;
+                    }
                     if (isViteHandledPath(pathOnly)) {
                       next();
                       return;
                     }
-                    const relative = stripBase(pathOnly, config.base);
                     if (relative.startsWith("/assets/")) {
                       sendKbFile(
                         response,
@@ -878,6 +914,7 @@ export async function createDevServer(
       try {
         const files = [...pending];
         pending.clear();
+        session.searchIndexJson = undefined;
         const edited: string[] = [];
         let structural = false;
         for (const file of files) {

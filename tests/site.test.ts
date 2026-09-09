@@ -264,6 +264,28 @@ describe("static site build", () => {
     }
   });
 
+  it("serves a working search index in dev", { timeout: 60_000 }, async () => {
+    const server = await createDevServer(root, { port: 0 });
+    try {
+      const address = server.httpServer?.address();
+      if (!address || typeof address === "string")
+        throw new Error("Missing dev port");
+      const response = await fetch(
+        `http://127.0.0.1:${address.port}/fixture/search-index.json`,
+      );
+      expect(response.status).toBe(200);
+      const search = MiniSearch.loadJSON(await response.text(), {
+        fields: ["title", "headings", "text"],
+        storeFields: ["route", "title", "text"],
+        tokenize: tokenizeSearch,
+        processTerm: normalizeSearchTerm,
+      });
+      expect(search.search("指南")[0]?.route).toBe("/notes/2");
+    } finally {
+      await server.close();
+    }
+  });
+
   it("picks up a single-note edit without a full session rebuild", { timeout: 60_000 }, async () => {
     const server = await createDevServer(root, { port: 0 });
     try {
