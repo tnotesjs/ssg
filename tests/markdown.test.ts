@@ -129,6 +129,33 @@ describe("Markdown compatibility helpers", () => {
     expect(html).toContain('data-tn-island="mindmap"');
   });
 
+  it("hides all but the first code-group panel in SSR HTML", async () => {
+    const compiler = await createMarkdownCompiler(compilerConfig);
+    const source = [
+      "::: code-group",
+      "",
+      "```js [a.js]",
+      "console.log(1)",
+      "```",
+      "",
+      "```ts [b.ts]",
+      "console.log(2)",
+      "```",
+      "",
+      ":::",
+    ].join("\n");
+    await compiler.prepare([source]);
+    const { html } = compiler.compile(source, "n.md", "/n", "n");
+    // Without the initial state every panel paints stacked until
+    // hydrateIslands runs — a visible flash on each navigation.
+    expect(html).toContain(
+      '<div class="tn-code-group__panel active" role="tabpanel">',
+    );
+    expect(html).toContain(
+      '<div class="tn-code-group__panel" role="tabpanel" hidden style="display:none">',
+    );
+  });
+
   it("exposes structured outline headings with github-style ids", async () => {
     const compiler = await createMarkdownCompiler(compilerConfig);
     const { html, data } = compiler.compile(

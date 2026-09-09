@@ -345,9 +345,14 @@ function configureCodeBlocks(md: MarkdownIt, lineNumbers: boolean) {
     const token = tokens[index];
     const highlighted = highlightCodeSync(token.content, token.info);
     const block = `<div data-tn-code="${escapeHtml(encodeURIComponent(token.content))}"><CodeBlock :code="${bindJson(token.content)}" :info="${bindJson(token.info)}" :line-numbers="${lineNumbers}" :highlighted-html="${bindJson(highlighted)}" /></div>`;
-    return token.meta?.tnCodeGroupIndex === undefined
-      ? `${block}\n`
-      : `<div class="tn-code-group__panel" role="tabpanel">${block}</div>\n`;
+    const groupIndex = token.meta?.tnCodeGroupIndex;
+    if (groupIndex === undefined) return `${block}\n`;
+    // SSR must emit the initial tab state: without it every panel paints
+    // stacked until hydrateIslands runs — a visible flash on each navigation,
+    // worst in dev where the client bundle loads slowly.
+    return groupIndex === 0
+      ? `<div class="tn-code-group__panel active" role="tabpanel">${block}</div>\n`
+      : `<div class="tn-code-group__panel" role="tabpanel" hidden style="display:none">${block}</div>\n`;
   };
 }
 

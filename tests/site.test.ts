@@ -253,6 +253,12 @@ describe("static site build", () => {
       const html = await response.text();
       expect(html).toContain("Vue SFC works");
       expect(html).toContain("id=\"tn-page-data\"");
+      // Dev styles are inlined into <head> so first paint is styled without
+      // waiting on the JS module graph (link tags still flash in Safari and
+      // embedded webviews).
+      const head = html.slice(0, html.indexOf("</head>"));
+      expect(head).toContain("<style>");
+      expect(head).toContain("--tn-c-");
     } finally {
       await server.close();
     }

@@ -129,8 +129,11 @@ function joinBase(base: string, file: string): string {
 /**
  * Dev-only: entry.ts imports CSS as JS modules, which Vite injects as
  * <style> tags *after* the module graph loads — a flash of unstyled article
- * on every navigation. Serve the same files as plain <link> tags instead;
- * Vite dev returns raw CSS for stylesheet requests.
+ * on every navigation. Serving the files as <link> tags relies on
+ * browser-specific render-blocking and Accept-header negotiation (Safari and
+ * embedded webviews still flash), so inline them instead: ~20KB total, no
+ * url()/@import inside to rebase, and entry.ts keeps its imports so Vite's
+ * JS-injected duplicates continue to provide HMR.
  */
 const DEV_STYLE_SPECIFIERS = [
   "@tnotesjs/ui/styles/tokens.css",
@@ -139,16 +142,17 @@ const DEV_STYLE_SPECIFIERS = [
   "@tnotesjs/ui/styles/swiper.css",
 ];
 
-function devStyleTags(): string {
+async function devStyleBlocks(): Promise<string> {
   const files = [
     ...DEV_STYLE_SPECIFIERS.map((specifier) =>
       packageRequire.resolve(specifier),
     ),
     path.join(clientRoot, "theme.css"),
   ];
-  return files
-    .map((file) => `<link rel="stylesheet" href="/@fs${file}" />`)
-    .join("\n    ");
+  const contents = await Promise.all(
+    files.map((file) => fs.readFile(file, "utf8")),
+  );
+  return contents.map((css) => `<style>\n${css}\n</style>`).join("\n    ");
 }
 
 function injectDevStyles(html: string, tags: string): string {
@@ -744,7 +748,7 @@ export async function createDevServer(
   await linkRuntimeDependencies(config.cacheDir);
   await writeRuntimeEntries(config);
   const session = await createDevSession(config);
-  const styleTags = devStyleTags();
+  const styleTags = await devStyleBlocks();
 
   const server = await createViteServer({
     root: config.cacheDir,
@@ -843,7 +847,10 @@ export async function createDevServer(
       port: options.port ?? config.port,
       strictPort: false,
       host: "127.0.0.1",
-      fs: { allow: [config.root, packageRoot] },
+      // No explicit fs.allow: Vite's default walks up to the workspace root,
+      // which covers every install layout — published packages under the KB's
+      // .pnpm store, and linked checkouts (ui/, ssg/, workspace .pnpm) when
+      // developing ssg against a real KB.
     },
     resolve: { dedupe: ["vue"], alias: [vueAlias()] },
     ssr: { noExternal: ["@tnotesjs/ui"] },
