@@ -1,20 +1,24 @@
 import { existsSync } from "node:fs";
+import { createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import vue from "@vitejs/plugin-vue";
+import matter from "gray-matter";
 import MiniSearch from "minisearch";
 import {
   build as viteBuild,
   createServer as createViteServer,
   preview as vitePreview,
+  type Manifest,
   type PreviewServer,
+  type ViteDevServer,
 } from "vite";
 
 import { resolveConfig } from "./config";
 import { normalizeSearchTerm, tokenizeSearch } from "./client/search";
-import { createMarkdownCompiler, type CompiledMarkdown } from "./markdown";
+import { createMarkdownCompiler, extractMarkdownLinks } from "./markdown";
 import {
   resolveNotePath,
   resolveNoteSlug,
@@ -22,10 +26,17 @@ import {
   type NoteRef,
 } from "./noteRoute";
 import { collectSite, routeToOutput, type SourcePage } from "./pages";
+import {
+  catalogFromPages,
+  pageModuleId,
+  PageSourceStore,
+  slimPageData,
+} from "./pageStore";
 import { tnotesPlugin } from "./vitePlugin";
 
 import type { PageData, ResolvedSsgConfig } from "./types";
-import type { ServerResponse } from "node:http";
+import type { Component } from "vue";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import type { PreviewServerHook } from "vite";
 
 const packageRoot = path.resolve(
@@ -34,6 +45,9 @@ const packageRoot = path.resolve(
 );
 const clientRoot = path.join(packageRoot, "src/client");
 const packageRequire = createRequire(import.meta.url);
+
+/** Recycle the SSR Vite server so compiled page modules can be GC'd. */
+const SSR_SERVER_PAGES = 250;
 
 async function linkRuntimeDependencies(cacheDir: string) {
   const modulesDirectory = path.join(cacheDir, "node_modules");
@@ -65,6 +79,10 @@ function htmlEscape(value: string) {
   });
 }
 
+function jsonScript(value: unknown) {
+  return JSON.stringify(value).replace(/</g, "\\u003c");
+}
+
 function renderHead(config: ResolvedSsgConfig) {
   return config.head
     .map(([tag, attrs, content = ""]) => {
@@ -83,7 +101,6 @@ function pageDocument(
   route: string,
   page: PageData,
   appHtml: string,
-  dev: boolean,
 ) {
   const description = page.description || config.description;
   return `<!doctype html>
@@ -98,14 +115,73 @@ function pageDocument(
   </head>
   <body>
     <div id="app" data-route="${htmlEscape(route)}">${appHtml}</div>
+    <script type="application/json" id="tn-page-data">${jsonScript(slimPageData(page))}</script>
     <script type="module" src="/entry.ts"></script>
-    ${
-      dev
-        ? `<script>new EventSource(${JSON.stringify(`${config.base}__tnotes_reload`)}).onmessage=event=>{if(event.data==='reload')location.reload()}</script>`
-        : ""
-    }
   </body>
 </html>`;
+}
+
+function joinBase(base: string, file: string): string {
+  const prefix = base.endsWith("/") ? base : `${base}/`;
+  return `${prefix}${file.replace(/^\//, "")}`;
+}
+
+/**
+ * Dev-only: entry.ts imports CSS as JS modules, which Vite injects as
+ * <style> tags *after* the module graph loads — a flash of unstyled article
+ * on every navigation. Serve the same files as plain <link> tags instead;
+ * Vite dev returns raw CSS for stylesheet requests.
+ */
+const DEV_STYLE_SPECIFIERS = [
+  "@tnotesjs/ui/styles/tokens.css",
+  "@tnotesjs/ui/styles/prose.css",
+  "@tnotesjs/ui/styles/code.css",
+  "@tnotesjs/ui/styles/swiper.css",
+];
+
+function devStyleTags(): string {
+  const files = [
+    ...DEV_STYLE_SPECIFIERS.map((specifier) =>
+      packageRequire.resolve(specifier),
+    ),
+    path.join(clientRoot, "theme.css"),
+  ];
+  return files
+    .map((file) => `<link rel="stylesheet" href="/@fs${file}" />`)
+    .join("\n    ");
+}
+
+function injectDevStyles(html: string, tags: string): string {
+  const next = html.replace("</head>", `    ${tags}\n  </head>`);
+  if (next === html) {
+    throw new Error("Failed to inject dev styles into HTML (</head> missing)");
+  }
+  return next;
+}
+
+function clientAssetTags(base: string, manifest: Manifest): string {
+  const entry = Object.values(manifest).find((chunk) => chunk.isEntry);
+  if (!entry) {
+    throw new Error("Vite manifest is missing the client entry");
+  }
+  const links = (entry.css ?? []).map(
+    (href) => `<link rel="stylesheet" href="${joinBase(base, href)}" />`,
+  );
+  return [
+    ...links,
+    `<script type="module" src="${joinBase(base, entry.file)}"></script>`,
+  ].join("\n    ");
+}
+
+function applyClientAssets(html: string, tags: string): string {
+  const next = html.replace(
+    /<script type="module" src="[^"]*entry\.ts"><\/script>/,
+    tags,
+  );
+  if (next === html) {
+    throw new Error("Failed to inject client assets into HTML (entry.ts script tag missing)");
+  }
+  return next;
 }
 
 function resolveInternalRoute(raw: string, currentRoute: string) {
@@ -126,7 +202,6 @@ function resolveInternalRoute(raw: string, currentRoute: string) {
 function validateDeadLinks(
   config: ResolvedSsgConfig,
   pages: SourcePage[],
-  compiled: Map<string, CompiledMarkdown>,
   notes: NoteRef[],
 ) {
   if (config.ignoreDeadLinks === true) return;
@@ -136,7 +211,7 @@ function validateDeadLinks(
     : [];
   const errors: string[] = [];
   for (const page of pages) {
-    for (const link of compiled.get(`${page.file}:${page.route}`)?.links ?? []) {
+    for (const link of extractMarkdownLinks(page.source)) {
       const localFile = decodeURIComponent(link.split(/[?#]/)[0]);
       if (
         !localFile.startsWith("/") &&
@@ -161,93 +236,50 @@ function validateDeadLinks(
   }
 }
 
-async function prepareBuild(config: ResolvedSsgConfig) {
-  const { pages, sidebar, snapshot } = await collectSite(config);
-  const notes: NoteRef[] = snapshot.notes.map((note) => ({
+function notesFromSnapshot(
+  snapshot: Awaited<ReturnType<typeof collectSite>>["snapshot"],
+): NoteRef[] {
+  return snapshot.notes.map((note) => ({
     index: note.index,
     id: note.frontmatter.id,
   }));
-  for (const diagnostic of snapshot.diagnostics) {
-    if (diagnostic.severity === "error") {
-      console.warn(`[kb] ${diagnostic.message}`);
-    }
-  }
-  if (!pages.some((page) => page.route === "/404")) {
-    const file = path.join(config.cacheDir, "404.md");
-    const source = "# 页面未找到\n\n[返回首页](/)\n";
-    await fs.writeFile(file, source);
-    pages.push({ file, route: "/404", source, titleHint: "404", noteIndex: "" });
-  }
-  const compiler = await createMarkdownCompiler(config, notes);
-  await compiler.prepare(pages.map((page) => page.source));
-  const compiled = new Map<string, CompiledMarkdown>();
-  for (const page of pages) {
-    compiled.set(
-      `${page.file}:${page.route}`,
-      compiler.compile(page.source, page.file, page.route, page.titleHint),
-    );
-  }
-  validateDeadLinks(config, pages, compiled, notes);
-  return { pages, sidebar, compiled, notes };
 }
 
-async function writeSearchIndex(
+async function ensure404Page(
   config: ResolvedSsgConfig,
   pages: SourcePage[],
-  compiled: Map<string, CompiledMarkdown>,
 ) {
-  const search = new MiniSearch<PageData>({
-    idField: "route",
-    fields: ["title", "headings", "text"],
-    storeFields: ["route", "title", "text"],
-    tokenize: tokenizeSearch,
-    processTerm: normalizeSearchTerm,
-  });
-  // The home note is emitted at both "/" and its /notes/... route — index the
-  // first occurrence ("/") only.
-  const seenFiles = new Set<string>();
-  const documents = pages
-    .filter((page) => page.route !== "/404")
-    .filter((page) => {
-      if (seenFiles.has(page.file)) return false;
-      seenFiles.add(page.file);
-      return true;
-    })
-    .map((page) => {
-      const data = compiled.get(`${page.file}:${page.route}`)!.data;
-      return {
-        ...data,
-        // MiniSearch indexes string fields; flatten structured outline headings.
-        headings: data.headings
-          .map((heading) => (typeof heading === "string" ? heading : heading.text))
-          .join(" "),
-      };
-    });
-  search.addAll(documents as unknown as PageData[]);
-  await fs.writeFile(
-    path.join(config.outDir, "search-index.json"),
-    JSON.stringify(search),
-  );
+  if (pages.some((page) => page.route === "/404")) return;
+  const file = path.join(config.cacheDir, "404.md");
+  const source = "# 页面未找到\n\n[返回首页](/)\n";
+  await fs.writeFile(file, source);
+  pages.push({ file, route: "/404", source, titleHint: "404", noteIndex: "" });
 }
 
-/** Library-level assets/ are referenced as ../assets/... — copy verbatim. */
-async function copyAssets(config: ResolvedSsgConfig) {
-  const source = path.join(config.root, "assets");
-  if (!existsSync(source)) return;
-  await fs.cp(source, path.join(config.outDir, "assets"), {
-    recursive: true,
+/** Runtime template compilation (page-from-HTML) needs the full Vue build. */
+function vueAlias(): { find: string; replacement: string } {
+  return {
+    find: "vue",
+    replacement: path.join(
+      path.dirname(packageRequire.resolve("vue/package.json")),
+      "dist/vue.esm-bundler.js",
+    ),
+  };
+}
+
+function vuePlugin() {
+  return vue({
+    include: [/\.vue$/],
+    template: {
+      transformAssetUrls: false,
+      compilerOptions: {
+        isCustomElement: (tag) => tag.startsWith("mjx-"),
+      },
+    },
   });
 }
 
-export async function buildSite(
-  root = process.cwd(),
-  options: { dev?: boolean } = {},
-) {
-  const config = await resolveConfig(root);
-  await fs.rm(config.cacheDir, { recursive: true, force: true });
-  await fs.mkdir(config.cacheDir, { recursive: true });
-  await linkRuntimeDependencies(config.cacheDir);
-  const { pages, sidebar, compiled, notes } = await prepareBuild(config);
+async function writeRuntimeEntries(config: ResolvedSsgConfig) {
   await fs.writeFile(
     path.join(config.cacheDir, "entry.ts"),
     `import ${JSON.stringify(path.join(clientRoot, "entry.ts"))}`,
@@ -256,42 +288,152 @@ export async function buildSite(
     path.join(config.cacheDir, "ssr-entry.ts"),
     `export { render } from ${JSON.stringify(path.join(clientRoot, "ssr.ts"))}`,
   );
+}
 
-  const plugins = () => [
-    tnotesPlugin(config, sidebar, pages, compiled, notes),
-    vue({
-      include: [/\.vue$/],
-      template: {
-        // Markdown-generated HTML references assets relatively (../assets/…);
-        // the files are copied verbatim, so asset-URL imports must stay off.
-        transformAssetUrls: false,
-        compilerOptions: {
-          isCustomElement: (tag) => tag.startsWith("mjx-"),
-        },
-      },
-    }),
-  ];
-  const server = await createViteServer({
+function invalidatePageModule(server: ViteDevServer, route: string) {
+  const id = pageModuleId(route);
+  const mod =
+    server.moduleGraph.getModuleById(id) ??
+    server.moduleGraph.getModuleById(`\0${id}`);
+  if (mod) server.moduleGraph.invalidateModule(mod);
+}
+
+async function loadRenderer(server: ViteDevServer) {
+  return (await server.ssrLoadModule("/ssr-entry.ts")) as {
+    render: (
+      route: string,
+      data: PageData,
+      options: { page?: Component; html?: string },
+    ) => Promise<{ html: string; data: PageData }>;
+  };
+}
+
+async function createSsrVite(
+  config: ResolvedSsgConfig,
+  store: PageSourceStore,
+) {
+  return createViteServer({
     root: config.cacheDir,
     base: config.base,
     publicDir: config.publicDir,
     configFile: false,
     appType: "custom",
-    plugins: plugins(),
+    plugins: [tnotesPlugin(config, store), vuePlugin()],
     server: { middlewareMode: true, fs: { allow: [config.root, packageRoot] } },
-    resolve: { dedupe: ["vue"] },
+    resolve: { dedupe: ["vue"], alias: [vueAlias()] },
     ssr: { noExternal: ["@tnotesjs/ui"] },
     logLevel: "warn",
   });
-  const renderer = (await server.ssrLoadModule("/ssr-entry.ts")) as {
-    render: (route: string) => Promise<{ html: string; data: PageData }>;
-  };
-  const inputs: Record<string, string> = {};
+}
+
+async function writeSearchIndex(
+  config: ResolvedSsgConfig,
+  entries: Array<{ file: string; route: string; data: PageData }>,
+) {
+  const search = new MiniSearch<PageData>({
+    idField: "route",
+    fields: ["title", "headings", "text"],
+    storeFields: ["route", "title", "text"],
+    tokenize: tokenizeSearch,
+    processTerm: normalizeSearchTerm,
+  });
+  const seenFiles = new Set<string>();
+  const documents = entries
+    .filter((entry) => entry.route !== "/404")
+    .filter((entry) => {
+      if (seenFiles.has(entry.file)) return false;
+      seenFiles.add(entry.file);
+      return true;
+    })
+    .map((entry) => ({
+      ...entry.data,
+      headings: entry.data.headings
+        .map((heading) =>
+          typeof heading === "string" ? heading : heading.text,
+        )
+        .join(" "),
+    }));
+  search.addAll(documents as unknown as PageData[]);
+  await fs.writeFile(
+    path.join(config.outDir, "search-index.json"),
+    JSON.stringify(search),
+  );
+}
+
+async function copyAssets(config: ResolvedSsgConfig) {
+  const source = path.join(config.root, "assets");
+  if (!existsSync(source)) return;
+  await fs.cp(source, path.join(config.outDir, "assets"), {
+    recursive: true,
+  });
+}
+
+export async function buildSite(root = process.cwd()) {
+  const config = await resolveConfig(root);
+  await fs.rm(config.cacheDir, { recursive: true, force: true });
+  await fs.mkdir(config.cacheDir, { recursive: true });
+  await linkRuntimeDependencies(config.cacheDir);
+  await writeRuntimeEntries(config);
+
+  const { pages, sidebar, snapshot } = await collectSite(config);
+  const notes = notesFromSnapshot(snapshot);
+  for (const diagnostic of snapshot.diagnostics) {
+    if (diagnostic.severity === "error") {
+      console.warn(`[kb] ${diagnostic.message}`);
+    }
+  }
+  await ensure404Page(config, pages);
+  validateDeadLinks(config, pages, notes);
+
+  const compiler = await createMarkdownCompiler(config, notes);
+  await compiler.prepare(pages.map((page) => page.source));
+
+  const store = new PageSourceStore();
+  store.sidebar = sidebar;
+  store.notes = notes;
+  store.catalog = catalogFromPages(config, pages);
+
+  let server = await createSsrVite(config, store);
+  let renderer = await loadRenderer(server);
+  const searchEntries: Array<{ file: string; route: string; data: PageData }> =
+    [];
   try {
-    for (const page of pages) {
+    for (let index = 0; index < pages.length; index++) {
+      if (index > 0 && index % SSR_SERVER_PAGES === 0) {
+        await server.close();
+        server = await createSsrVite(config, store);
+        renderer = await loadRenderer(server);
+      }
+      const page = pages[index]!;
+      const compiled = compiler.compile(
+        page.source,
+        page.file,
+        page.route,
+        page.titleHint,
+      );
       let rendered: { html: string; data: PageData };
       try {
-        rendered = await renderer.render(page.route);
+        if (compiled.hasUserSfc) {
+          store.setCompiled(
+            page.route,
+            compiled.vueSource,
+            compiled.data,
+            compiled.html,
+            true,
+          );
+          const loaded = (await server.ssrLoadModule(
+            pageModuleId(page.route),
+          )) as { default: Component };
+          rendered = await renderer.render(page.route, compiled.data, {
+            page: loaded.default,
+          });
+          store.dropVue(page.route);
+          invalidatePageModule(server, page.route);
+        } else {
+          rendered = await renderer.render(page.route, compiled.data, {
+            html: compiled.html,
+          });
+        }
       } catch (error) {
         throw new Error(
           `渲染页面失败 ${page.route}（${page.file}）：${(error as Error).message}`,
@@ -303,42 +445,55 @@ export async function buildSite(
       await fs.mkdir(path.dirname(filename), { recursive: true });
       await fs.writeFile(
         filename,
-        pageDocument(
-          config,
-          page.route,
-          rendered.data,
-          rendered.html,
-          options.dev === true,
-        ),
+        pageDocument(config, page.route, rendered.data, rendered.html),
       );
-      inputs[page.route === "/" ? "index" : page.route.slice(1)] = filename;
+      searchEntries.push({
+        file: page.file,
+        route: page.route,
+        data: compiled.data,
+      });
     }
   } finally {
     await server.close();
   }
 
+  // Chrome-only client graph — page SFCs are not imported.
   await viteBuild({
     root: config.cacheDir,
     base: config.base,
     publicDir: config.publicDir,
     configFile: false,
-    plugins: plugins(),
+    plugins: [tnotesPlugin(config, store), vuePlugin()],
     build: {
       outDir: config.outDir,
       emptyOutDir: true,
-      // dist/assets/ belongs to kb content (copied verbatim); bundle chunks
-      // live under _chunks/ to avoid collisions.
       assetsDir: "_chunks",
-      // Large optional renderers and uncommon Shiki grammars are emitted as
-      // lazy chunks. Keep warnings focused on the eagerly loaded application.
       chunkSizeWarningLimit: 800,
-      rollupOptions: { input: inputs },
+      manifest: true,
+      rollupOptions: {
+        input: path.join(config.cacheDir, "entry.ts"),
+      },
     },
     resolve: { dedupe: ["vue"] },
     logLevel: "warn",
   });
+
+  const manifest = JSON.parse(
+    await fs.readFile(path.join(config.outDir, ".vite", "manifest.json"), "utf8"),
+  ) as Manifest;
+  const clientTags = clientAssetTags(config.base, manifest);
+  for (const page of pages) {
+    const relative = routeToOutput(page.route);
+    const html = applyClientAssets(
+      await fs.readFile(path.join(config.cacheDir, relative), "utf8"),
+      clientTags,
+    );
+    const dest = path.join(config.outDir, relative);
+    await fs.mkdir(path.dirname(dest), { recursive: true });
+    await fs.writeFile(dest, html);
+  }
   await copyAssets(config);
-  await writeSearchIndex(config, pages, compiled);
+  await writeSearchIndex(config, searchEntries);
   await fs.writeFile(
     path.join(config.outDir, "notes-map.json"),
     `${JSON.stringify(notes)}\n`,
@@ -394,7 +549,6 @@ export async function previewSite(
       },
     ],
     preview: {
-      // 9193 by default — 5173 is reserved for Vite / desk `pnpm dev`.
       port: options.port ?? config.port,
       strictPort: false,
       host: options.host ?? "127.0.0.1",
@@ -404,63 +558,349 @@ export async function previewSite(
   });
 }
 
+interface DevSession {
+  pages: SourcePage[];
+  byRoute: Map<string, SourcePage>;
+  byFile: Map<string, SourcePage>;
+  store: PageSourceStore;
+  compiler: Awaited<ReturnType<typeof createMarkdownCompiler>>;
+}
+
+async function createDevSession(config: ResolvedSsgConfig): Promise<DevSession> {
+  const { pages, sidebar, snapshot } = await collectSite(config);
+  const notes = notesFromSnapshot(snapshot);
+  await ensure404Page(config, pages);
+  const compiler = await createMarkdownCompiler(config, notes);
+  await compiler.prepare(pages.map((page) => page.source));
+  const store = new PageSourceStore();
+  store.sidebar = sidebar;
+  store.notes = notes;
+  store.catalog = catalogFromPages(config, pages);
+  return {
+    pages,
+    byRoute: new Map(pages.map((page) => [page.route, page])),
+    byFile: new Map(pages.map((page) => [path.resolve(page.file), page])),
+    store,
+    compiler,
+  };
+}
+
+async function refreshDevSession(
+  config: ResolvedSsgConfig,
+  session: DevSession,
+) {
+  const next = await createDevSession(config);
+  session.pages = next.pages;
+  session.byRoute = next.byRoute;
+  session.byFile = next.byFile;
+  session.compiler = next.compiler;
+  session.store.sidebar = next.store.sidebar;
+  session.store.notes = next.store.notes;
+  session.store.catalog = next.store.catalog;
+  session.store.dropAllVue();
+}
+
+/**
+ * Incremental path for content-only edits to a single known page: re-read
+ * that file, refresh its catalog entry, and drop its compiled cache so the
+ * next request recompiles just it. Full session rebuilds re-read and
+ * re-parse every note (seconds at leetcode scale, blocking the host process).
+ */
+async function applyPageEdit(
+  session: DevSession,
+  file: string,
+): Promise<void> {
+  const page = session.byFile.get(path.resolve(file));
+  if (!page) return;
+  const source = await fs.readFile(file, "utf8");
+  if (source === page.source) return;
+  page.source = source;
+  session.store.dropVue(page.route);
+  const entry = session.store.catalog[page.route];
+  if (entry) {
+    const parsed = matter(source);
+    entry.description = String(parsed.data.description ?? "");
+    entry.frontmatter = parsed.data;
+  }
+}
+
+function isViteHandledPath(pathname: string): boolean {
+  return (
+    pathname.includes("/@") ||
+    pathname.includes("node_modules") ||
+    /\.(?:tsx?|mts|cts|js|mjs|cjs|css|scss|sass|less|vue|json|map|wasm|png|jpe?g|gif|svg|webp|ico|woff2?|ttf|eot)$/i.test(
+      pathname,
+    )
+  );
+}
+
+const ASSET_TYPES: Record<string, string> = {
+  ".txt": "text/plain; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".html": "text/html; charset=utf-8",
+};
+
+function sendKbFile(
+  response: ServerResponse,
+  file: string,
+  root: string,
+  next: () => void,
+) {
+  const resolved = path.resolve(file);
+  const rootResolved = path.resolve(root);
+  if (resolved !== rootResolved && !resolved.startsWith(`${rootResolved}${path.sep}`)) {
+    next();
+    return;
+  }
+  if (!existsSync(resolved)) {
+    next();
+    return;
+  }
+  const type = ASSET_TYPES[path.extname(resolved).toLowerCase()] ?? "application/octet-stream";
+  response.setHeader("Content-Type", type);
+  createReadStream(resolved).pipe(response);
+}
+
+async function renderDevPage(
+  server: ViteDevServer,
+  config: ResolvedSsgConfig,
+  session: DevSession,
+  route: string,
+) {
+  const source =
+    session.byRoute.get(route) ?? session.byRoute.get("/404") ?? session.pages[0];
+  if (!source) throw new Error(`No page registered for route: ${route}`);
+  let data = session.store.getCompiledData(source.route);
+  let html = session.store.getHtml(source.route);
+  if (!data || html === undefined) {
+    const compiled = session.compiler.compile(
+      source.source,
+      source.file,
+      source.route,
+      source.titleHint,
+    );
+    session.store.setCompiled(
+      source.route,
+      compiled.vueSource,
+      compiled.data,
+      compiled.html,
+      compiled.hasUserSfc,
+    );
+    data = compiled.data;
+    html = compiled.html;
+  }
+  const renderer = await loadRenderer(server);
+  if (session.store.hasUserSfc(source.route)) {
+    const loaded = (await server.ssrLoadModule(pageModuleId(source.route))) as {
+      default: Component;
+    };
+    const rendered = await renderer.render(source.route, data, {
+      page: loaded.default,
+    });
+    return pageDocument(config, source.route, rendered.data, rendered.html);
+  }
+  const rendered = await renderer.render(source.route, data, { html });
+  return pageDocument(config, source.route, rendered.data, rendered.html);
+}
+
+/**
+ * On-demand Vite SSR. Desk preview used to call full `buildSite` on every
+ * change (minutes at leetcode scale). Markdown is compiled per request.
+ */
 export async function createDevServer(
   root = process.cwd(),
   options: { port?: number } = {},
-) {
-  const first = await buildSite(root, { dev: true });
-  const clients = new Set<ServerResponse>();
-  const server = await previewSite(root, { port: options.port }, (preview) => {
-    preview.middlewares.use((request, response, next) => {
-      if (!request.url?.split("?")[0].endsWith("/__tnotes_reload")) {
-        next();
-        return;
-      }
-      response.writeHead(200, {
-        "Cache-Control": "no-cache",
-        Connection: "keep-alive",
-        "Content-Type": "text/event-stream",
-      });
-      response.write(": connected\n\n");
-      clients.add(response);
-      request.once("close", () => clients.delete(response));
-    });
+): Promise<ViteDevServer> {
+  const config = await resolveConfig(root);
+  await fs.rm(config.cacheDir, { recursive: true, force: true });
+  await fs.mkdir(config.cacheDir, { recursive: true });
+  await linkRuntimeDependencies(config.cacheDir);
+  await writeRuntimeEntries(config);
+  const session = await createDevSession(config);
+  const styleTags = devStyleTags();
+
+  const server = await createViteServer({
+    root: config.cacheDir,
+    base: config.base,
+    publicDir: config.publicDir,
+    configFile: false,
+    appType: "custom",
+    plugins: [
+      tnotesPlugin(config, session.store),
+      vuePlugin(),
+      {
+        name: "tnotes-dev-html",
+        configureServer(vite) {
+          return () => {
+            vite.middlewares.use(
+              (
+                request: IncomingMessage,
+                response: ServerResponse,
+                next: (error?: unknown) => void,
+              ) => {
+                void (async () => {
+                  try {
+                    const pathOnly = decodeURIComponent(
+                      (request.url ?? "/").split("?")[0] ?? "/",
+                    );
+                    if (isViteHandledPath(pathOnly)) {
+                      next();
+                      return;
+                    }
+                    const relative = stripBase(pathOnly, config.base);
+                    if (relative.startsWith("/assets/")) {
+                      sendKbFile(
+                        response,
+                        path.join(config.root, relative),
+                        config.root,
+                        next,
+                      );
+                      return;
+                    }
+                    const leaf = relative.split("/").pop() ?? "";
+                    if (leaf.includes(".") && !leaf.endsWith(".html")) {
+                      next();
+                      return;
+                    }
+                    const current =
+                      relative.replace(/\.html$/i, "") || "/";
+                    const canonical = resolveNotePath(
+                      pathOnly,
+                      session.store.notes,
+                      config.base,
+                    );
+                    if (canonical && current !== canonical) {
+                      response.statusCode = 302;
+                      response.setHeader(
+                        "Location",
+                        `${config.base}${canonical.slice(1)}`.replace(
+                          /\/{2,}/g,
+                          "/",
+                        ),
+                      );
+                      response.end();
+                      return;
+                    }
+                    const route = session.byRoute.has(current)
+                      ? current
+                      : session.byRoute.has("/404")
+                        ? "/404"
+                        : "/";
+                    const html = await renderDevPage(
+                      vite,
+                      config,
+                      session,
+                      route,
+                    );
+                    const transformed = await vite.transformIndexHtml(
+                      pathOnly,
+                      injectDevStyles(html, styleTags),
+                    );
+                    response.statusCode = route === "/404" && current !== "/404" ? 404 : 200;
+                    response.setHeader(
+                      "Content-Type",
+                      "text/html;charset=utf-8",
+                    );
+                    response.end(transformed);
+                  } catch (error) {
+                    next(error);
+                  }
+                })();
+              },
+            );
+          };
+        },
+      },
+    ],
+    server: {
+      port: options.port ?? config.port,
+      strictPort: false,
+      host: "127.0.0.1",
+      fs: { allow: [config.root, packageRoot] },
+    },
+    resolve: { dedupe: ["vue"], alias: [vueAlias()] },
+    ssr: { noExternal: ["@tnotesjs/ui"] },
+    logLevel: "warn",
   });
+
   let timer: NodeJS.Timeout | undefined;
-  let building = false;
-  let pending = false;
-  const rebuild = async () => {
-    if (building) {
-      pending = true;
-      return;
-    }
-    building = true;
-    try {
-      await buildSite(root, { dev: true });
-      for (const client of clients) client.write("data: reload\n\n");
-    } catch (error) {
-      console.error(error);
-    } finally {
-      building = false;
-      if (pending) {
-        pending = false;
-        void rebuild();
-      }
+  let refreshing = false;
+  const pending = new Set<string>();
+  const invalidateVirtualModules = () => {
+    for (const id of ["\0virtual:tnotes-site", "\0virtual:tnotes-pages"]) {
+      const mod = server.moduleGraph.getModuleById(id);
+      if (mod) server.moduleGraph.invalidateModule(mod);
     }
   };
-  const watcher = (await import("node:fs")).watch(
-    first.config.root,
-    { recursive: true },
-    (_event, filename) => {
-      if (!filename || /(?:node_modules|\.git|\.tnotes\/dist)/.test(filename))
+  const flush = () => {
+    void (async () => {
+      if (refreshing) {
+        // Keep the queued files and retry shortly — dropping them would lose
+        // edits made while a structural refresh is running.
+        timer = setTimeout(flush, 200);
         return;
-      clearTimeout(timer);
-      timer = setTimeout(() => void rebuild(), 120);
-    },
-  );
-  server.httpServer?.once("close", () => {
-    watcher.close();
-    for (const client of clients) client.end();
-  });
+      }
+      refreshing = true;
+      try {
+        const files = [...pending];
+        pending.clear();
+        const edited: string[] = [];
+        let structural = false;
+        for (const file of files) {
+          const normalized = file.replaceAll("\\", "/");
+          if (
+            /(?:^|\/)(?:TOC\.md|tnotes\.json)$/.test(normalized) ||
+            normalized.endsWith(".vue")
+          ) {
+            structural = true;
+            break;
+          }
+          const page = session.byFile.get(path.resolve(file));
+          if (page && existsSync(file)) {
+            edited.push(file);
+          } else if (page || (normalized.includes("/notes/") && normalized.endsWith(".md"))) {
+            // Deleted or newly added note — the catalog/sidebar must rebuild.
+            structural = true;
+            break;
+          }
+          // Anything else (assets, …) needs no session work; reload below.
+        }
+        if (structural) {
+          await refreshDevSession(config, session);
+          invalidateVirtualModules();
+        } else if (edited.length) {
+          for (const file of edited) await applyPageEdit(session, file);
+          invalidateVirtualModules();
+        }
+        server.ws.send({ type: "full-reload" });
+      } catch (error) {
+        console.error(error);
+      } finally {
+        refreshing = false;
+      }
+    })();
+  };
+  const onKbChange = (file: string) => {
+    if (/(?:node_modules|\.git|(?:^|[/\\])\.tnotes(?:[/\\]|$))/.test(file))
+      return;
+    // Atomic-write staging files (`.name.<uuid>.tmp`) — the rename onto the
+    // real path emits its own event.
+    if (/(?:^|[/\\])\.[^/\\]*\.tmp$/.test(file)) return;
+    clearTimeout(timer);
+    pending.add(file);
+    timer = setTimeout(flush, 120);
+  };
+  server.watcher.add(config.root);
+  server.watcher.on("all", (_event, file) => onKbChange(file));
+
+  await server.listen();
   return server;
 }

@@ -16,9 +16,7 @@
       <aside class="tn-site-sidebar">
         <SidebarTree :items="site.sidebar" :route="route" :base="site.base" />
       </aside>
-      <main class="tn-site-main">
-        <component :is="page" />
-      </main>
+      <main class="tn-site-main" v-html="articleHtml"></main>
       <aside v-if="outlineHeadings.length" class="tn-site-outline">
         <strong>本页目录</strong>
         <ul>
@@ -57,6 +55,8 @@
         </ul>
       </section>
     </div>
+
+    <ImagePreview v-if="mounted" />
   </div>
 </template>
 
@@ -64,7 +64,7 @@
 import GithubSlugger from "github-slugger";
 import MiniSearch from "minisearch";
 import { computed, nextTick, onMounted, ref, watch } from "vue";
-import { hydrateTnSwipers } from "@tnotesjs/ui/swiper";
+import ImagePreview from "@tnotesjs/ui/image-preview";
 import site from "virtual:tnotes-site";
 
 import SidebarTree from "./components/SidebarTree.vue";
@@ -72,9 +72,9 @@ import { normalizeSearchTerm, tokenizeSearch } from "./search";
 import type { PageData, PageHeading } from "../types";
 
 const props = defineProps<{
-  page: object;
   route: string;
   data: PageData;
+  articleHtml: string;
 }>();
 
 type SearchResult = Pick<PageData, "route" | "title" | "text">;
@@ -115,13 +115,6 @@ const toggleTheme = () => {
   localStorage.setItem("tnotes-theme", next);
 };
 
-function hydratePageSwipers(): void {
-  void nextTick(() => {
-    const main = document.querySelector(".tn-site-main");
-    if (main) hydrateTnSwipers(main);
-  });
-}
-
 watch(searchOpen, async (open) => {
   if (!open) return;
   await nextTick();
@@ -144,15 +137,14 @@ watch(searchOpen, async (open) => {
   }
 });
 
-watch(
-  () => props.route,
-  () => hydratePageSwipers(),
-);
+// Teleport content is client-only; rendering it during SSR breaks hydration
+// (server emits anchors, client expects a v-if comment and the walk drifts).
+const mounted = ref(false);
 
 onMounted(() => {
+  mounted.value = true;
   const theme = localStorage.getItem("tnotes-theme");
   if (theme)
     document.documentElement.classList.toggle("dark", theme === "dark");
-  hydratePageSwipers();
 });
 </script>

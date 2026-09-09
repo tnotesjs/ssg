@@ -101,6 +101,34 @@ describe("Markdown compatibility helpers", () => {
     expect(html).toContain("<summary>细节</summary>");
   });
 
+  it("emits hydratable island hosts for mermaid, mindmap, and code", async () => {
+    const compiler = await createMarkdownCompiler(compilerConfig);
+    await compiler.prepare(["```js\nconsole.log(1)\n```"]);
+    const { html } = compiler.compile(
+      [
+        "```js",
+        "console.log(1)",
+        "```",
+        "",
+        "```mermaid",
+        "graph TD",
+        "  A --> B",
+        "```",
+        "",
+        "```mindmap",
+        "- 根",
+        "  - 子",
+        "```",
+      ].join("\n"),
+      "n.md",
+      "/n",
+      "n",
+    );
+    expect(html).toContain('data-tn-code="');
+    expect(html).toContain('data-tn-island="mermaid"');
+    expect(html).toContain('data-tn-island="mindmap"');
+  });
+
   it("exposes structured outline headings with github-style ids", async () => {
     const compiler = await createMarkdownCompiler(compilerConfig);
     const { html, data } = compiler.compile(
@@ -120,7 +148,7 @@ describe("Markdown compatibility helpers", () => {
   it("treats markdown mustaches as literal text, not Vue interpolations", async () => {
     expect(escapeVueMustaches("{{ n }}")).toBe("&#123;&#123; n &#125;&#125;");
     const compiler = await createMarkdownCompiler(compilerConfig);
-    const { html, vueSource } = compiler.compile(
+    const { html } = compiler.compile(
       [
         "inline `{{ count }}`",
         "",
@@ -137,7 +165,5 @@ describe("Markdown compatibility helpers", () => {
     expect(html).toContain("&#123;&#123; n &#125;&#125;");
     expect(html).toContain("&#123;&#123; live &#125;&#125;");
     expect(html).not.toMatch(/\{\{/);
-    const template = vueSource.slice(vueSource.indexOf("<template>"));
-    expect(template).not.toMatch(/\{\{/);
   });
 });

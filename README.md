@@ -31,3 +31,9 @@ are encoded so Vue's template compiler leaves them alone — the same characters
 show in Desk, GitHub, and the published site. Interactive values belong in a
 sibling `.vue` file or a component prop (`:text="message"`), not in `{{ n }}`
 written into the Markdown.
+
+Production pages SSR each note in isolation, then hydrate only the chrome
+(search, theme, sidebar). Article widgets (code groups, copy, mermaid, mindmap)
+are enhanced from the static HTML so the client bundle never compiles every
+note SFC. `tnotes-ssg dev` SSRs the requested page on demand instead of
+rebuilding the whole site on each change.

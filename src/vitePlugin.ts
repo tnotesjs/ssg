@@ -1,28 +1,24 @@
 import type { Plugin } from "vite";
-import type { CompiledMarkdown } from "./markdown";
-import type { NoteRef } from "./noteRoute";
-import type { ResolvedSsgConfig, SidebarItem } from "./types";
-import type { SourcePage } from "./pages";
+
+import {
+  PAGE_ID_PREFIX,
+  parsePageModuleId,
+  type PageSourceStore,
+} from "./pageStore";
+import type { ResolvedSsgConfig } from "./types";
 
 const PAGES_ID = "\0virtual:tnotes-pages";
 const SITE_ID = "\0virtual:tnotes-site";
 const THEME_ID = "\0virtual:tnotes-theme";
-// NB: no `\0` prefix — Vite's createFilter (used by plugin-vue's `include`)
-// rejects null-byte ids, which would leave the SFC source uncompiled.
-const PAGE_ID_PREFIX = "virtual:tnotes-page:";
 
-const serializeSite = (
-  site: ResolvedSsgConfig,
-  sidebar: SidebarItem[],
-  notes: NoteRef[],
-) => ({
+const serializeSite = (site: ResolvedSsgConfig, store: PageSourceStore) => ({
   base: site.base,
   title: site.title,
   description: site.description,
   lang: site.lang,
   discussions: site.discussions,
-  sidebar,
-  notes,
+  sidebar: store.sidebar,
+  notes: store.notes,
   markdown: {
     lineNumbers: site.markdown.lineNumbers,
     math: site.markdown.math,
@@ -31,27 +27,17 @@ const serializeSite = (
 });
 
 /**
- * Page modules are virtual modules whose ids end with `.vue` so plugin-vue
- * compiles them natively. Importing `file.md?route=…` breaks whenever a note
- * title ends with an extension-like suffix (`tsconfig.json.md` → route ends
- * with `.json`), because Vite core plugins match ids by trailing extension.
+ * Virtual modules for the SSG.
+ *
+ * Client builds must not import page SFCs. Each note template is the full
+ * article HTML; putting `() => import(page)` in one module made Vite compile
+ * the entire library in a single graph (O(n) huge SFCs, OOM at ~10k notes).
+ * SSR loads `virtual:tnotes-page:…vue` one route at a time instead.
  */
 export function tnotesPlugin(
   config: ResolvedSsgConfig,
-  sidebar: SidebarItem[],
-  sources: SourcePage[],
-  compiled: Map<string, CompiledMarkdown>,
-  notes: NoteRef[] = [],
+  store: PageSourceStore,
 ): Plugin {
-  const byRoute = new Map(
-    sources.map((page) => [
-      page.route,
-      compiled.get(`${page.file}:${page.route}`)!,
-    ]),
-  );
-  const pageId = (route: string) =>
-    `${PAGE_ID_PREFIX}${encodeURIComponent(route)}.vue`;
-
   return {
     name: "tnotes-ssg",
     enforce: "pre",
@@ -63,7 +49,7 @@ export function tnotesPlugin(
     },
     load(id) {
       if (id === SITE_ID) {
-        return `export default ${JSON.stringify(serializeSite(config, sidebar, notes))}`;
+        return `export default ${JSON.stringify(serializeSite(config, store))}`;
       }
       if (id === THEME_ID) {
         return config.theme
@@ -71,22 +57,13 @@ export function tnotesPlugin(
           : "export default {}";
       }
       if (id === PAGES_ID) {
-        const imports = sources
-          .map(
-            (page) =>
-              `${JSON.stringify(page.route)}: () => import(${JSON.stringify(pageId(page.route))})`,
-          )
-          .join(",\n");
-        const data = Object.fromEntries(
-          sources.map((page) => [page.route, byRoute.get(page.route)!.data]),
-        );
-        return `export const pages = {${imports}}; export const pageData = ${JSON.stringify(data)};`;
+        // Catalog only — never an import map of page SFCs.
+        return `export const pages = {}; export const pageData = ${JSON.stringify(store.catalog)};`;
       }
       if (id.startsWith(PAGE_ID_PREFIX)) {
-        const route = decodeURIComponent(
-          id.slice(PAGE_ID_PREFIX.length, -".vue".length),
-        );
-        return byRoute.get(route)?.vueSource;
+        const route = parsePageModuleId(id);
+        if (!route) return undefined;
+        return store.getVue(route);
       }
     },
   };

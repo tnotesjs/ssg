@@ -4,7 +4,7 @@ import path from "node:path";
 import MiniSearch from "minisearch";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { buildSite, previewSite } from "../src/site";
+import { buildSite, createDevServer, previewSite } from "../src/site";
 import {
   normalizeSearchTerm,
   tokenizeSearch,
@@ -81,6 +81,10 @@ id: 00000000-0000-4000-8000-000000000002
 
 $x^2$
 
+\`\`\`js
+console.log(1)
+\`\`\`
+
 \`\`\`mermaid
 graph TD
   A --> B
@@ -154,6 +158,36 @@ describe("static site build", () => {
     expect(fs.readFileSync(dist("fixture.txt"), "utf8")).toBe("public asset");
   });
 
+  it("keeps mermaid and mindmap sources on island hosts for client hydrate", () => {
+    const guide = fs.readFileSync(dist("notes/2.html"), "utf8");
+    expect(guide).toContain('data-tn-island="mermaid"');
+    expect(guide).toContain('data-tn-island="mindmap"');
+    expect(guide).toContain("data-tn-code=");
+  });
+
+  it("does not compile note bodies into the shared client bundle", () => {
+    const chunkDir = dist("_chunks");
+    const js = fs
+      .readdirSync(chunkDir)
+      .filter((name) => name.endsWith(".js"))
+      .map((name) => fs.readFileSync(path.join(chunkDir, name), "utf8"))
+      .join("\n");
+    expect(js).not.toContain("Vue SFC works");
+    expect(js).not.toContain("容器管线正常");
+    expect(js).not.toContain("一段足迹正文");
+  });
+
+  it("injects a single hashed client bundle into every HTML page", () => {
+    const home = fs.readFileSync(dist("index.html"), "utf8");
+    const guide = fs.readFileSync(dist("notes/2.html"), "utf8");
+    expect(home).not.toContain("entry.ts");
+    expect(home).toMatch(/<script type="module" src="\/fixture\/_chunks\/[^"]+\.js"><\/script>/);
+    expect(home).toMatch(/<link rel="stylesheet" href="\/fixture\/_chunks\/[^"]+\.css" \/>/);
+    const homeScript = home.match(/<script type="module" src="([^"]+)"><\/script>/)?.[1];
+    const guideScript = guide.match(/<script type="module" src="([^"]+)"><\/script>/)?.[1];
+    expect(homeScript).toBe(guideScript);
+  });
+
   it("emits a serialized local-search index", () => {
     const serialized = fs.readFileSync(dist("search-index.json"), "utf8");
     const index = JSON.parse(serialized) as { documentCount: number };
@@ -200,6 +234,51 @@ describe("static site build", () => {
       await new Promise<void>((resolve, reject) =>
         server.httpServer.close((error) => (error ? reject(error) : resolve())),
       );
+    }
+  });
+
+  it("serves pages on demand without rebuilding the whole site", { timeout: 60_000 }, async () => {
+    const server = await createDevServer(root, { port: 0 });
+    try {
+      const address = server.httpServer?.address();
+      if (!address || typeof address === "string")
+        throw new Error("Missing dev port");
+      const response = await fetch(`http://127.0.0.1:${address.port}/fixture/`);
+      expect(response.status).toBe(200);
+      const html = await response.text();
+      expect(html).toContain("Vue SFC works");
+      expect(html).toContain("id=\"tn-page-data\"");
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("picks up a single-note edit without a full session rebuild", { timeout: 60_000 }, async () => {
+    const server = await createDevServer(root, { port: 0 });
+    try {
+      const address = server.httpServer?.address();
+      if (!address || typeof address === "string")
+        throw new Error("Missing dev port");
+      const url = `http://127.0.0.1:${address.port}/fixture/notes/2`;
+      const before = await (await fetch(url)).text();
+      expect(before).toContain("容器管线正常");
+
+      const file = path.join(root, "notes", "0002. 指南.md");
+      fs.writeFileSync(
+        file,
+        fs.readFileSync(file, "utf8") + "\n\n增量更新生效。\n",
+      );
+
+      const deadline = Date.now() + 15_000;
+      let after = "";
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        after = await (await fetch(url)).text();
+        if (after.includes("增量更新生效")) break;
+      }
+      expect(after).toContain("增量更新生效");
+    } finally {
+      await server.close();
     }
   });
 });

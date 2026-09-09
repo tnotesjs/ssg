@@ -51,6 +51,8 @@ export interface CompiledMarkdown {
   html: string;
   data: PageData;
   links: string[];
+  /** User `<script>` / `<style>` blocks — needs a Vite page module to SSR. */
+  hasUserSfc: boolean;
 }
 
 const escapeHtml = (value: string) =>
@@ -342,7 +344,7 @@ function configureCodeBlocks(md: MarkdownIt, lineNumbers: boolean) {
   md.renderer.rules.fence = (tokens, index) => {
     const token = tokens[index];
     const highlighted = highlightCodeSync(token.content, token.info);
-    const block = `<CodeBlock :code="${bindJson(token.content)}" :info="${bindJson(token.info)}" :line-numbers="${lineNumbers}" :highlighted-html="${bindJson(highlighted)}" />`;
+    const block = `<div data-tn-code="${escapeHtml(encodeURIComponent(token.content))}"><CodeBlock :code="${bindJson(token.content)}" :info="${bindJson(token.info)}" :line-numbers="${lineNumbers}" :highlighted-html="${bindJson(highlighted)}" /></div>`;
     return token.meta?.tnCodeGroupIndex === undefined
       ? `${block}\n`
       : `<div class="tn-code-group__panel" role="tabpanel">${block}</div>\n`;
@@ -363,8 +365,17 @@ function configureMermaidFence(md: MarkdownIt) {
     if (parts[0] === "mermaid") {
       const centered = parts.slice(1).some((p) => p.toLowerCase() === "center");
       const id = `mermaid-${++uid}`;
+      const graph = encodeURIComponent(token.content);
       const centerAttr = centered ? ' :center="true"' : "";
-      return `<Mermaid id="${id}" graph="${encodeURIComponent(token.content)}"${centerAttr} />`;
+      const island = [
+        `data-tn-island="mermaid"`,
+        `data-graph="${escapeHtml(graph)}"`,
+        `data-id="${escapeHtml(id)}"`,
+        centered ? `data-center="true"` : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
+      return `<div ${island}><Mermaid id="${id}" graph="${graph}"${centerAttr} /></div>`;
     }
     if (token.info.trim() === "mmd") {
       tokens[index].info = "mermaid";
@@ -383,15 +394,25 @@ function configureMindmapFence(md: MarkdownIt) {
     const content = normalizeMindmapMarkdown(token.content, {
       title: fenceOptions.title,
     });
+    const encoded = encodeURIComponent(content.trim());
     const props = [
-      `content="${encodeURIComponent(content.trim())}"`,
+      `content="${encoded}"`,
       fenceOptions.initialExpandLevel === undefined
         ? ""
         : `:initialExpandLevel="${fenceOptions.initialExpandLevel}"`,
     ]
       .filter(Boolean)
       .join(" ");
-    return `<Mindmap ${props}></Mindmap>\n`;
+    const island = [
+      `data-tn-island="mindmap"`,
+      `data-content="${escapeHtml(encoded)}"`,
+      fenceOptions.initialExpandLevel === undefined
+        ? ""
+        : `data-expand="${fenceOptions.initialExpandLevel}"`,
+    ]
+      .filter(Boolean)
+      .join(" ");
+    return `<div ${island}><Mindmap ${props}></Mindmap></div>\n`;
   };
 }
 
@@ -618,16 +639,19 @@ export async function createMarkdownCompiler(
         ) ?? [];
       const customBlocks =
         env.sfcBlocks?.customBlocks.map((item) => item.content) ?? [];
-      const pageExport = `<script>export const __pageData = ${JSON.stringify(data)}; export default { name: ${JSON.stringify(relativePath)} }</script>`;
-      const vueSource = [
-        pageExport,
-        ...scripts,
-        `<template><div class="tn-prose">${html}</div></template>`,
-        ...styles,
-        ...customBlocks,
-      ].join("\n");
+      const hasUserSfc =
+        scripts.length > 0 || styles.length > 0 || customBlocks.length > 0;
+      const vueSource = hasUserSfc
+        ? [
+            `<script>export const __pageData = ${JSON.stringify(data)}; export default { name: ${JSON.stringify(relativePath)} }</script>`,
+            ...scripts,
+            `<template><div class="tn-prose">${html}</div></template>`,
+            ...styles,
+            ...customBlocks,
+          ].join("\n")
+        : "";
       const links = extractMarkdownLinks(raw);
-      return { vueSource, html, data, links };
+      return { vueSource, html, data, links, hasUserSfc };
     },
   };
 }

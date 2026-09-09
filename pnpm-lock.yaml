@@ -21,8 +21,8 @@ importers:
         specifier: ^0.2.0
         version: 0.2.0
       '@tnotesjs/ui':
-        specifier: ^0.1.2
-        version: 0.1.2(vue@3.5.41(typescript@5.9.3))
+        specifier: ^0.1.5
+        version: 0.1.5(vue@3.5.41(typescript@5.9.3))
       '@vitejs/plugin-vue':
         specifier: 6.0.8
         version: 6.0.8(vite@7.3.6(@types/node@24.6.2)(sass-embedded@1.100.0)(sass@1.100.0))(vue@3.5.41(typescript@5.9.3))
@@ -824,8 +824,8 @@ packages:
     resolution: {integrity: sha512-uDMllL2l7zq0d63K8i1cnzdBZfwnkXLw+t48cXIhYg3tvVCpb38YOy0QFAhHTg8xRreV+Jdh3jBaf+wo0FAEFg==}
     engines: {node: '>=18.0.0'}
 
-  '@tnotesjs/ui@0.1.2':
-    resolution: {integrity: sha512-1/Upeu7XCIQhIDOxlpt37ZASiXlii/705lR4KPQXpeks1iRCw4LqWFMipEW/DDo89ASspaQUCyb2NhHpfuXpPg==}
+  '@tnotesjs/ui@0.1.5':
+    resolution: {integrity: sha512-cHNGo7Qxab7XPTB4poBcwAYUmKL7CJs+LwVo6iIKYDB2xrSGtpTUJyx1n0b96/TMIgDTRecrvlmnul+4WAArOQ==}
     engines: {node: '>=18.0.0'}
     peerDependencies:
       vue: ^3.5.0
@@ -3219,7 +3219,7 @@ snapshots:
 
   '@tnotesjs/mindmap-core@0.2.2': {}
 
-  '@tnotesjs/ui@0.1.2(vue@3.5.41(typescript@5.9.3))':
+  '@tnotesjs/ui@0.1.5(vue@3.5.41(typescript@5.9.3))':
     dependencies:
       '@tnotesjs/mindmap-core': 0.2.2
       marked: 15.0.12

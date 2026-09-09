@@ -9,9 +9,10 @@ declare module "markdown-it-emoji";
 declare module "markdown-it-task-lists";
 
 declare module "virtual:tnotes-pages" {
-  import type { Component } from "vue";
-  export const pages: Record<string, () => Promise<{ default: Component }>>;
-  export const pageData: Record<string, import("./types").PageData>;
+  import type { PageData } from "./types";
+  /** Empty on purpose — page SFCs are SSR-only. */
+  export const pages: Record<string, never>;
+  export const pageData: Record<string, PageData>;
 }
 
 declare module "virtual:tnotes-site" {
